@@ -1,5 +1,5 @@
 {
-  "name": "support-you-yoro-reservation",
+  "name": "support-you-yoro-reservation-clean",
   "version": "1.0.0",
   "private": true,
   "scripts": {
@@ -7,11 +7,14 @@
     "build": "next build",
     "start": "next start"
   },
-"devDependencies": {
-  "typescript": "^5.0.0",
-  "@types/node": "^20.0.0",
-  "@types/react": "^18.0.0"
-}
-
+  "dependencies": {
+    "next": "14.2.3",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.0.0"
   }
 }
