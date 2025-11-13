@@ -1,43 +1,10 @@
-import { createClient } from "@supabase/supabase-js";
+// app/api/reservations/route.ts
+import { NextResponse } from "next/server";
 
-export async function POST(req: Request) {
-  try {
-    const { name, phone, date, time, notes } = await req.json();
-
-    if (!name || !phone || !date || !time) {
-      return new Response(JSON.stringify({ error: "必須項目が未入力です" }), {
-        status: 400,
-        headers: { "content-type": "application/json" },
-      });
-    }
-
-    const supabaseUrl = process.env.SUPABASE_URL!;
-    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY!; // サーバー専用鍵（クライアントに出ません）
-    const supabase = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } });
-
-    const { error } = await supabase.from("reservations").insert({
-      name,
-      phone,
-      date,
-      time,
-      notes: notes ?? "",
-    });
-
-    if (error) {
-      return new Response(JSON.stringify({ error: error.message }), {
-        status: 400,
-        headers: { "content-type": "application/json" },
-      });
-    }
-
-    return new Response(JSON.stringify({ ok: true }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  } catch {
-    return new Response(JSON.stringify({ error: "不正なリクエスト" }), {
-      status: 400,
-      headers: { "content-type": "application/json" },
-    });
-  }
+export async function GET() {
+  const items = [
+    { id: 1, name: "山田太郎", date: "2025-11-15", time: "10:00" },
+    { id: 2, name: "佐藤花子", date: "2025-11-16", time: "14:00" }
+  ];
+  return NextResponse.json({ ok: true, items });
 }
