@@ -1,4 +1,7 @@
 "use client";
+<p style={{ textAlign: 'right', margin: '8px 0' }}>
+  <a href="/api/admin/export">CSVダウンロード</a>
+</p>
 
 import { useEffect, useState } from "react";
 
