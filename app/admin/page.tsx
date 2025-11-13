@@ -1,59 +1,64 @@
-// app/admin/page.tsx
-import { headers } from "next/headers";
+"use client";
 
-export const dynamic = "force-dynamic"; // 最新を毎回取得
+import { useEffect, useState } from "react";
 
-export default async function AdminPage() {
-  const h = headers();
-  const proto = h.get("x-forwarded-proto") ?? "https";
-  const host = h.get("host") ?? "";
-  const base = `${proto}://${host}`;
+type Item = {
+  id: string;
+  guardianName: string;
+  email: string;
+  preferredDate: string;
+  notes?: string;
+  createdAt: string;
+};
 
-  const res = await fetch(`${base}/api/reservations`, { cache: "no-store" });
-  const data: { ok: boolean; items: any[] } = await res.json();
+export default function AdminPage() {
+  const [items, setItems] = useState<Item[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch("/api/reservations", { cache: "no-store" });
+        const j = await r.json();
+        setItems(j.items ?? []);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
 
   return (
-    <main style={{ padding: "2rem", fontFamily: "sans-serif", maxWidth: 900 }}>
+    <main style={{ padding: "2rem", fontFamily: "sans-serif" }}>
       <h1>予約一覧</h1>
-      <p style={{ color: "#666" }}>最新の予約が新しい順に表示されます。</p>
-
-      {!data?.ok ? (
-        <p style={{ color: "#c00" }}>取得に失敗しました。</p>
-      ) : data.items.length === 0 ? (
+      {loading ? (
+        <p>読み込み中…</p>
+      ) : items.length === 0 ? (
         <p>まだ予約はありません。</p>
       ) : (
         <table
-          style={{
-            width: "100%",
-            borderCollapse: "collapse",
-            marginTop: 16,
-            fontSize: 14,
-          }}
+          style={{ borderCollapse: "collapse", width: "100%", marginTop: 16 }}
         >
           <thead>
             <tr>
-              <th style={th}>受付ID</th>
+              <th style={th}>受付番号</th>
               <th style={th}>保護者名</th>
               <th style={th}>メール</th>
               <th style={th}>希望日</th>
               <th style={th}>メモ</th>
-              <th style={th}>作成時刻</th>
+              <th style={th}>作成日時</th>
             </tr>
           </thead>
           <tbody>
-            {data.items
-              .slice()
-              .reverse()
-              .map((r: any) => (
-                <tr key={r.id}>
-                  <td style={td}>{r.id}</td>
-                  <td style={td}>{r.guardianName}</td>
-                  <td style={td}>{r.email}</td>
-                  <td style={td}>{r.preferredDate}</td>
-                  <td style={td}>{r.notes ?? ""}</td>
-                  <td style={td}>{r.createdAt}</td>
-                </tr>
-              ))}
+            {items.map((x) => (
+              <tr key={x.id}>
+                <td style={td}>{x.id}</td>
+                <td style={td}>{x.guardianName}</td>
+                <td style={td}>{x.email}</td>
+                <td style={td}>{x.preferredDate}</td>
+                <td style={td}>{x.notes ?? ""}</td>
+                <td style={td}>{new Date(x.createdAt).toLocaleString()}</td>
+              </tr>
+            ))}
           </tbody>
         </table>
       )}
@@ -64,10 +69,11 @@ export default async function AdminPage() {
 const th: React.CSSProperties = {
   textAlign: "left",
   borderBottom: "1px solid #ddd",
-  padding: "6px 8px",
+  padding: "8px",
   background: "#fafafa",
 };
+
 const td: React.CSSProperties = {
   borderBottom: "1px solid #eee",
-  padding: "6px 8px",
+  padding: "8px",
 };
