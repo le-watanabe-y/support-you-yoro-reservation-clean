@@ -1,44 +1,48 @@
-// app/api/reservations/route.ts
-import { NextResponse } from "next/server";
-
-type Payload = {
-  guardianName: string;
-  email: string;
-  preferredDate: string; // YYYY-MM-DD
-  notes?: string;
-};
-
-type Item = Payload & { id: string; createdAt: string };
-
-export const dynamic = "force-dynamic"; // 常に最新
-
-// デモ用のメモリ保存（永続化なし）
-const mem: Item[] = [];
+import { NextResponse } from 'next/server';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
 export async function GET() {
-  return NextResponse.json({ ok: true, items: mem });
+  const { data, error } = await supabaseAdmin
+    .from('reservations')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
+  }
+  return NextResponse.json({ ok: true, items: data ?? [] });
 }
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json()) as Payload;
-    if (!body.guardianName || !body.email || !body.preferredDate) {
+    const body = await req.json();
+
+    if (!body?.guardianName || !body?.email || !body?.preferredDate) {
       return NextResponse.json(
-        { ok: false, message: "必須項目（名前/メール/希望日）が足りません" },
+        { ok: false, message: '必須項目（名前/メール/希望日）が足りません' },
         { status: 400 }
       );
     }
-    const item: Item = {
-      id: crypto.randomUUID(),
-      ...body,
-      createdAt: new Date().toISOString(),
+
+    const insert = {
+      guardian_name: body.guardianName,
+      email: body.email,
+      preferred_date: body.preferredDate, // YYYY-MM-DD
+      notes: body.notes ?? null,
     };
-    mem.push(item);
-    return NextResponse.json({ ok: true, id: item.id, item }, { status: 201 });
-  } catch {
-    return NextResponse.json(
-      { ok: false, message: "JSONの解釈に失敗しました" },
-      { status: 400 }
-    );
+
+    const { data, error } = await supabaseAdmin
+      .from('reservations')
+      .insert(insert)
+      .select('id')
+      .single();
+
+    if (error) {
+      return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
+    }
+
+    return NextResponse.json({ ok: true, id: data?.id }, { status: 201 });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, message: e?.message ?? 'サーバーエラー' }, { status: 500 });
   }
 }
