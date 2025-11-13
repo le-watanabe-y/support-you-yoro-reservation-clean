@@ -1,19 +1,23 @@
-import { supabaseAdmin, type ReservationRow } from '@/lib/supabaseAdmin';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
-const url = process.env.SUPABASE_URL!;
-const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-
-export const supabaseAdmin = createClient(url, serviceKey, {
-  auth: { persistSession: false },
-  global: { headers: { "x-application-name": "support-reservation" } },
-});
-
-// 使う/使わないは自由（型が欲しいとき用）
+// public.reservations の行型（必要に応じて調整）
 export type ReservationRow = {
-  id: string;
+  id: string;                 // uuid
   guardian_name: string;
   email: string;
-  preferred_date: string; // YYYY-MM-DD
+  preferred_date: string;     // 'YYYY-MM-DD'
   notes: string | null;
-  created_at: string;
+  created_at: string;         // ISO timestamp
 };
+
+const url = process.env.SUPABASE_URL!;
+const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+
+if (!url || !serviceRoleKey) {
+  throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
+}
+
+export const supabaseAdmin: SupabaseClient = createClient(url, serviceRoleKey, {
+  auth: { persistSession: false },
+  global: { headers: { 'x-application-name': 'support-reservation' } },
+});
