@@ -1,23 +1,20 @@
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+// lib/supabaseAdmin.ts
+import { createClient } from "@supabase/supabase-js";
 
-// public.reservations の行型（必要に応じて調整）
 export type ReservationRow = {
-  id: string;                 // uuid
+  id: string;                // uuid想定（intでもstringでOK）
   guardian_name: string;
   email: string;
-  preferred_date: string;     // 'YYYY-MM-DD'
+  preferred_date: string;    // YYYY-MM-DD を文字列で
   notes: string | null;
-  created_at: string;         // ISO timestamp
+  created_at: string;
 };
 
 const url = process.env.SUPABASE_URL!;
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
-if (!url || !serviceRoleKey) {
-  throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
-}
-
-export const supabaseAdmin: SupabaseClient = createClient(url, serviceRoleKey, {
+// サーバー専用の管理クライアント（セッション保持なし）
+export const supabaseAdmin = createClient(url, serviceKey, {
   auth: { persistSession: false },
-  global: { headers: { 'x-application-name': 'support-reservation' } },
+  global: { headers: { "x-application-name": "support-reservation" } },
 });
