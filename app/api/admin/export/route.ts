@@ -1,4 +1,4 @@
-import { supabaseAdmin } from '@/lib/supabase-admin';
+import { supabaseAdmin, type ReservationRow } from '@/lib/supabaseAdmin';
 
 function escapeCsv(v: unknown) {
   const s = String(v ?? '');
