@@ -1,14 +1,20 @@
-// lib/holidays.ts
+// lib/jpHolidays.ts
 import Holidays from "date-holidays";
 
-/**
- * 日本の祝日判定（振替休日・国民の休日を含む）
- * 文字列 "YYYY-MM-DD" を直接渡して日付単位で判定します。
- */
 const hd = new Holidays("JP");
 
-export function isJapaneseHoliday(yyyy_mm_dd: string): boolean {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(yyyy_mm_dd)) return false;
-  const ret = hd.isHoliday(yyyy_mm_dd as any); // date-holidays は文字列でもOK
-  return !!ret; // 祝日ならオブジェクト/配列、平日なら null/false
+function toDateJst(input: string | Date): Date {
+  if (input instanceof Date) return new Date(input.getTime());
+  // 文字列は JST 暦日として扱う
+  return new Date(`${input}T00:00:00+09:00`);
+}
+
+/** 祝日かどうか（真偽値） */
+export function isJapanHoliday(input: string | Date): boolean {
+  return Boolean(hd.isHoliday(toDateJst(input)));
+}
+
+/** 祝日の詳しい情報（名称など）。祝日でなければ null */
+export function jpHolidayInfo(input: string | Date) {
+  return hd.isHoliday(toDateJst(input)) || null;
 }
