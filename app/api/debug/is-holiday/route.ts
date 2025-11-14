@@ -1,17 +1,26 @@
 // app/api/debug/is-holiday/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { isJpHoliday, jpHolidayInfo } from "@/lib/jpholiday";
+import { isJapaneseHoliday, jpHolidayInfo } from "@/lib/jpholiday";
 
+/** /api/debug/is-holiday?date=YYYY-MM-DD */
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
-  const date = searchParams.get("date") || "";
-
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-    return NextResponse.json({ ok: false, message: "date must be YYYY-MM-DD" }, { status: 400 });
+  const dateStr = searchParams.get("date");
+  if (!dateStr) {
+    return NextResponse.json(
+      { ok: false, error: "Missing date (YYYY-MM-DD)" },
+      { status: 400 }
+    );
   }
 
-  const isHoliday = isJpHoliday(date);
-  const info = jpHolidayInfo(date);
+  // 判定は UTC 固定で行う
+  const isHoliday = isJapaneseHoliday(dateStr);
+  const info = jpHolidayInfo(dateStr);
 
-  return NextResponse.json({ ok: true, date, isHoliday, name: info?.name ?? null });
+  return NextResponse.json({
+    ok: true,
+    date: dateStr,
+    holiday: isHoliday,
+    name: info?.name ?? null,
+  });
 }
