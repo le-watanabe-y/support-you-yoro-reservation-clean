@@ -1,20 +1,37 @@
-// lib/jpholiday.ts
+// /lib/jpholiday.ts
+// date-holidays を使って日本の祝日判定を提供します
 import Holidays from "date-holidays";
 
-// 日本の祝日カレンダー（ローカル無しで使える）
+export type JpHolidayInfo =
+  | { ok: true; holiday: true; name: string | null }
+  | { ok: true; holiday: false; name: null }
+  | { ok: false; holiday: false; name: null };
+
+// ライブラリのインスタンス（日本の祝日）
 const hd = new Holidays("JP");
 
-/** "YYYY-MM-DD" を渡すと祝日なら true */
-export function isJapaneseHoliday(dateStr: string): boolean {
-  return Boolean(hd.isHoliday(dateStr));
+/** 日本の祝日なら true を返す（正式名） */
+export function isJapaneseHoliday(date: Date): boolean {
+  try {
+    const res = hd.isHoliday(date);
+    if (!res) return false;
+    return Array.isArray(res) ? res.length > 0 : true;
+  } catch {
+    return false;
+  }
 }
 
-/** 祝日メタ（なければ null） */
-export function jpHolidayInfo(
-  dateStr: string
-): { name: string; type?: string } | null {
-  const info = hd.isHoliday(dateStr);
-  if (!info) return null;
-  const first = Array.isArray(info) ? info[0] : info;
-  return { name: first.name, type: first.type };
+/** 互換用エイリアス（既存コードが参照） */
+export const isJapanHoliday = isJapaneseHoliday;
+
+/** 判定結果の詳細（名称つき） */
+export function jpHolidayInfo(date: Date): JpHolidayInfo {
+  try {
+    const res = hd.isHoliday(date);
+    if (!res) return { ok: true, holiday: false, name: null };
+    const one = Array.isArray(res) ? res[0] : res;
+    return { ok: true, holiday: true, name: (one as any)?.name ?? null };
+  } catch {
+    return { ok: false, holiday: false, name: null };
+  }
 }
