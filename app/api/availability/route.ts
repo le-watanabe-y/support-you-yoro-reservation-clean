@@ -1,80 +1,13 @@
 // app/api/availability/route.ts
-import { NextResponse, NextRequest } from "next/server";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import {
-  normalizeDate,
-  isClosedDate,
-  withinOpenWindow,
-  LIMIT_DAILY,
-  LIMIT_BY_PERIOD,
-  COUNT_STATUSES,
-  periodFromTime,
-  type Period,
-} from "@/lib/reservationRules";
+import { NextRequest, NextResponse } from 'next/server';
+import { parseYmd, canAcceptForDate } from '@/lib/reservationRules';
 
 export async function GET(req: NextRequest) {
-  const url = new URL(req.url);
-  const dateParam = url.searchParams.get("date") ?? "";
-  const timeParam = url.searchParams.get("time"); // "HH:mm"（任意）
-
-  const date = normalizeDate(dateParam);
-  if (!date) {
-    return NextResponse.json({ ok: false, message: "date=YYYY-MM-DD を指定してください" }, { status: 400 });
+  const { searchParams } = new URL(req.url);
+  const dateStr = searchParams.get('date');
+  if (!dateStr) {
+    return NextResponse.json({ ok: false, message: 'query "date" is required (YYYY-MM-DD)' }, { status: 400 });
   }
-
-  const closed = isClosedDate(date);
-  const withinWindow = withinOpenWindow(date);
-
-  if (closed || !withinWindow) {
-    return NextResponse.json({
-      ok: true,
-      date,
-      time: timeParam ?? null,
-      closed,
-      withinWindow,
-      canReserve: false,
-      reason: closed ? "closed" : "out_of_window",
-    });
-  }
-
-  const p: Period = periodFromTime(timeParam);
-
-  // 日次の使用数
-  const daily = await supabaseAdmin
-    .from("reservations")
-    .select("id", { count: "exact", head: true })
-    .eq("date", date)
-    .in("status", COUNT_STATUSES as any);
-  const dailyCount = daily.count ?? 0;
-
-  // 枠（AM/PM）の使用数（dropoff_time or time_slot のどちらかで判定）
-  const orExpr = p === "am"
-    ? "dropoff_time.lt.12:00,time_slot.eq.am"
-    : "dropoff_time.gte.12:00,time_slot.eq.pm";
-
-  const per = await supabaseAdmin
-    .from("reservations")
-    .select("id", { count: "exact", head: true })
-    .eq("date", date)
-    .in("status", COUNT_STATUSES as any)
-    .or(orExpr);
-  const periodCount = per.count ?? 0;
-
-  const remainDaily = Math.max(0, LIMIT_DAILY - dailyCount);
-  const remainPeriod = Math.max(0, LIMIT_BY_PERIOD[p] - periodCount);
-  const canReserve = remainDaily > 0 && remainPeriod > 0;
-
-  return NextResponse.json({
-    ok: true,
-    date,
-    time: timeParam ?? null,
-    period: p,
-    closed,
-    withinWindow,
-    canReserve,
-    capacity: {
-      daily: { used: dailyCount, limit: LIMIT_DAILY, remain: remainDaily },
-      [p]:   { used: periodCount, limit: LIMIT_BY_PERIOD[p], remain: remainPeriod }
-    }
-  });
+  const judge = canAcceptForDate(parseYmd(dateStr));
+  return NextResponse.json({ ok: true, date: dateStr, ...judge });
 }
