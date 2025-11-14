@@ -1,59 +1,56 @@
 // app/api/availability/route.ts
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import {
-  LIMIT_DAILY,
-  LIMIT_BY_PERIOD,
-  COUNT_STATUSES,
-  normalizeDate,
-  isClosedDate,
-  withinOpenWindow,
-  isPeriod,
+  LIMITS,
+  parseYmd,
+  canAcceptForDate,
+  limitFor,
+  TimeSlot,
+  slotFromTimeStr,
 } from "@/lib/reservationRules";
 
-export async function GET(req: NextRequest) {
-  const url = new URL(req.url);
-  const date = normalizeDate(url.searchParams.get("date") || "");
+function isCountStatus(s: string | null): boolean {
+  return (LIMITS.countStatuses as readonly string[]).includes(String(s));
+}
 
-  if (!date) {
-    return NextResponse.json({ ok: false, message: "date is required" }, { status: 400 });
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const ymd = searchParams.get("date");
+  const time = searchParams.get("time"); // "HH:mm"（ある場合は優先）
+  const slotParam = searchParams.get("slot") as TimeSlot | null;
+  const slot: TimeSlot = time ? slotFromTimeStr(time) : (slotParam ?? "am");
+
+  if (!ymd) {
+    return NextResponse.json({ ok: false, message: "date を指定してください" }, { status: 400 });
+  }
+  const d = parseYmd(ymd);
+  if (!d) return NextResponse.json({ ok: false, message: "日付形式が不正です" }, { status: 400 });
+
+  const win = canAcceptForDate(d);
+  if (!win.ok) {
+    return NextResponse.json({ ok: true, canReserve: false, reason: win.reason, slot, time });
   }
 
   const { data, error } = await supabaseAdmin
     .from("reservations")
-    .select("period,status")
-    .eq("date", date)
-    .in("status", COUNT_STATUSES as any);
+    .select("id,status,time_slot")
+    .eq("preferred_date", ymd);
 
-  if (error) {
-    return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
-  }
+  if (error) return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
 
-  const counts = { total: 0, am: 0, pm: 0 };
-  for (const r of data ?? []) {
-    counts.total += 1;
-    const p = (r as any).period;
-    if (isPeriod(p)) counts[p] += 1;
-  }
+  const target = (data ?? []).filter((r: any) => isCountStatus(r.status));
+  const dayCount = target.length;
+  const slotCount = target.filter((r: any) => r.time_slot === slot).length;
 
-  const left = {
-    total: Math.max(0, LIMIT_DAILY - counts.total),
-    am: Math.max(0, LIMIT_BY_PERIOD.am - counts.am),
-    pm: Math.max(0, LIMIT_BY_PERIOD.pm - counts.pm),
-  };
-
-  const available = {
-    am: left.am > 0 && left.total > 0,
-    pm: left.pm > 0 && left.total > 0,
-  };
+  const canReserve = dayCount < LIMITS.day && slotCount < limitFor(slot);
 
   return NextResponse.json({
     ok: true,
-    date,
-    limits: { daily: LIMIT_DAILY, periods: LIMIT_BY_PERIOD },
-    counts,
-    left,
-    available,
-    canReserve: withinOpenWindow(date) && !isClosedDate(date),
+    date: ymd,
+    time,
+    slot,
+    canReserve,
+    counts: { day: dayCount, slot: slotCount, limits: { day: LIMITS.day, [slot]: limitFor(slot) } },
   });
 }
