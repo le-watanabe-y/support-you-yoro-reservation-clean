@@ -1,71 +1,74 @@
 // lib/reservationRules.ts
-import { isJapanHoliday } from "@/lib/jpHolidays";
+import { isJapanHoliday } from "@/lib/holidayJP";
 
-export type Slot = "am" | "pm" | null;
+/** —— ご指定の上限 —— */
+export const LIMIT_DAILY = 6;
+export const LIMIT_BY_PERIOD = { am: 6, pm: 6 } as const;
 
-export const RULES = {
-  DAILY_LIMIT: 6,           // 1日の総上限
-  SLOT_LIMIT_AM: 6,         // 午前の内部上限（集計用）
-  SLOT_LIMIT_PM: 6,         // 午後の内部上限（集計用）
-  COUNT_STATUSES: ["pending", "approved"] as const, // 定員に数えるステータス
-  AUTO_APPROVE_FIRST_N: 2,  // 先着自動承認人数（当日/前日ともに2名）
-  BLOCK_DUP_SAME_CHILD_SAME_DAY: true,
-  YEAR_END_CLOSED: [
-    { m: 12, from: 29, to: 31 },
-    { m: 1,  from: 1,  to: 4  },
-  ],
-} as const;
+/** 互換のため、過去の import を吸収 */
+export const LIMITS = {
+  daily: LIMIT_DAILY,
+  am: LIMIT_BY_PERIOD.am,
+  pm: LIMIT_BY_PERIOD.pm,
+};
 
-/** "YYYY-MM-DD" or Date → JSTの暦日文字列 */
-function ymdOfJst(input: string | Date): string {
-  if (typeof input === "string") return input;
-  const j = new Date(input.getTime() + 9 * 60 * 60 * 1000);
+/** 定員に数えるステータス（pending + approved） */
+export const COUNT_STATUSES = ["pending", "approved"] as const;
+
+export type Period = keyof typeof LIMIT_BY_PERIOD;
+
+const HOUR = 60 * 60 * 1000;
+const JST_OFFSET = 9 * HOUR;
+
+function ymdJST(d: Date): string {
+  const j = new Date(d.getTime() + JST_OFFSET);
   const y = j.getUTCFullYear();
   const m = String(j.getUTCMonth() + 1).padStart(2, "0");
-  const d = String(j.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
+  const day = String(j.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
-/** 受付ウィンドウ: D-1 12:00 ～ D 12:00（JST） */
-export function withinBookingWindow(ymd: string, now: Date = new Date()): boolean {
-  const end = new Date(`${ymd}T12:00:00+09:00`);
-  const begin = new Date(end.getTime() - 24 * 60 * 60 * 1000);
-  return begin <= now && now <= end;
+/** "YYYY-MM-DD" を妥当化（不正なら空文字） */
+export function normalizeDate(s: string): string {
+  const t = (s ?? "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(t) ? t : "";
 }
 
-/** 土日判定 */
-export function isWeekend(input: string | Date): boolean {
-  const [Y, M, D] = ymdOfJst(input).split("-").map(Number);
-  const dow = new Date(Y, M - 1, D).getDay(); // 0:日..6:土
+/** 年末年始休園（12/29〜1/4, JST） */
+export function isYearEnd(dateUtc: Date): boolean {
+  const [_, mm, dd] = ymdJST(dateUtc).split("-").map(Number);
+  return (mm === 12 && dd >= 29) || (mm === 1 && dd <= 4);
+}
+
+/** 土日（JST） */
+export function isWeekend(dateUtc: Date): boolean {
+  const j = new Date(dateUtc.getTime() + JST_OFFSET);
+  const dow = j.getUTCDay(); // 0:日, 6:土
   return dow === 0 || dow === 6;
 }
 
-/** 年末年始の固定休園 */
-export function isYearEndClosed(input: string | Date): boolean {
-  const [, mStr, dStr] = ymdOfJst(input).split("-");
-  const m = Number(mStr), d = Number(dStr);
-  return RULES.YEAR_END_CLOSED.some(r => r.m === m && d >= r.from && d <= r.to);
+/** 休園（週末／祝日／年末年始） */
+export function isClosedDate(date: string | Date): boolean {
+  const d = typeof date === "string" ? new Date(`${date}T00:00:00Z`) : date;
+  return isWeekend(d) || isJapanHoliday(d) || isYearEnd(d);
 }
 
-/** 休園日（＝土日 or 祝日 or 年末年始） */
-export function isClosedDate(input: string | Date): boolean {
-  return isWeekend(input) || isJapanHoliday(input) || isYearEndClosed(input);
+/** 受付ウィンドウ（JST：D-1 12:00 〜 D 12:00）内か？ */
+export function withinOpenWindow(date: string): boolean {
+  const norm = normalizeDate(date);
+  if (!norm) return false;
+
+  const d0 = new Date(`${norm}T00:00:00Z`); // D の UTC 0:00
+  const openStartUtc = new Date(d0.getTime() - 21 * HOUR); // D-1 12:00 JST
+  const closeAtUtc   = new Date(d0.getTime() + 3 * HOUR);  // D   12:00 JST
+  const nowUtc = new Date();
+
+  return nowUtc >= openStartUtc && nowUtc < closeAtUtc;
 }
 
-/** HH:MM → 内部スロット（am/pm）※UIは任意の時刻、内部集計はam/pm */
-export function deriveSlotFromTime(hhmm: string | null | undefined): Slot {
-  if (!hhmm) return null;
-  const h = Number(hhmm.split(":")[0]);
-  if (Number.isNaN(h)) return null;
+/** 利用者の「預け希望時刻」から AM/PM を推定 */
+export function periodFromTime(time?: string | null): Period {
+  if (!time) return "am";
+  const h = Number(time.split(":")[0] ?? "9");
   return h < 12 ? "am" : "pm";
-}
-
-export function slotLimit(slot: Slot): number | null {
-  if (slot === "am") return RULES.SLOT_LIMIT_AM;
-  if (slot === "pm") return RULES.SLOT_LIMIT_PM;
-  return null;
-}
-
-export function pickAutoStatus(approvedCountForDay: number): "approved" | "pending" {
-  return approvedCountForDay < RULES.AUTO_APPROVE_FIRST_N ? "approved" : "pending";
 }
