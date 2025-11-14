@@ -1,74 +1,65 @@
 // lib/reservationRules.ts
-import { isJapanHoliday } from "@/lib/holidayJP";
+import { isJapanHoliday } from '@/lib/jpHolidays';
 
-/** —— ご指定の上限 —— */
-export const LIMIT_DAILY = 6;
-export const LIMIT_BY_PERIOD = { am: 6, pm: 6 } as const;
+export type TimeSlot = 'am' | 'pm';
 
-/** 互換のため、過去の import を吸収 */
+// ご指定の上限・自動承認
 export const LIMITS = {
-  daily: LIMIT_DAILY,
-  am: LIMIT_BY_PERIOD.am,
-  pm: LIMIT_BY_PERIOD.pm,
+  daily: 6,
+  am: 6,
+  pm: 6,
+  autoApproveFirst: 2, // 先着2名は自動承認（残り4名はpending）
 };
 
-/** 定員に数えるステータス（pending + approved） */
-export const COUNT_STATUSES = ["pending", "approved"] as const;
+// 定員カウント対象（b: pending + approved）
+export const COUNT_STATUSES = ['pending', 'approved'] as const;
 
-export type Period = keyof typeof LIMIT_BY_PERIOD;
-
-const HOUR = 60 * 60 * 1000;
-const JST_OFFSET = 9 * HOUR;
-
-function ymdJST(d: Date): string {
-  const j = new Date(d.getTime() + JST_OFFSET);
-  const y = j.getUTCFullYear();
-  const m = String(j.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(j.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+// "YYYY-MM-DD" → 当日0時(UTC)
+export function parseYmd(ymd: string): Date {
+  const [y, m, d] = ymd.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d));
 }
 
-/** "YYYY-MM-DD" を妥当化（不正なら空文字） */
-export function normalizeDate(s: string): string {
-  const t = (s ?? "").trim();
-  return /^\d{4}-\d{2}-\d{2}$/.test(t) ? t : "";
-}
-
-/** 年末年始休園（12/29〜1/4, JST） */
-export function isYearEnd(dateUtc: Date): boolean {
-  const [_, mm, dd] = ymdJST(dateUtc).split("-").map(Number);
-  return (mm === 12 && dd >= 29) || (mm === 1 && dd <= 4);
-}
-
-/** 土日（JST） */
-export function isWeekend(dateUtc: Date): boolean {
-  const j = new Date(dateUtc.getTime() + JST_OFFSET);
-  const dow = j.getUTCDay(); // 0:日, 6:土
+// JST 土日
+function isWeekendJst(dateUtc: Date): boolean {
+  const jst = new Date(dateUtc.getTime() + 9 * 60 * 60 * 1000);
+  const dow = jst.getUTCDay(); // 0=Sun ... 6=Sat
   return dow === 0 || dow === 6;
 }
 
-/** 休園（週末／祝日／年末年始） */
-export function isClosedDate(date: string | Date): boolean {
-  const d = typeof date === "string" ? new Date(`${date}T00:00:00Z`) : date;
-  return isWeekend(d) || isJapanHoliday(d) || isYearEnd(d);
+// 年末年始（12/29〜1/4）JST
+function isYearEndJst(dateUtc: Date): boolean {
+  const jst = new Date(dateUtc.getTime() + 9 * 60 * 60 * 1000);
+  const m = jst.getUTCMonth(); // 0-based
+  const d = jst.getUTCDate();
+  return (m === 11 && d >= 29) || (m === 0 && d <= 4);
 }
 
-/** 受付ウィンドウ（JST：D-1 12:00 〜 D 12:00）内か？ */
-export function withinOpenWindow(date: string): boolean {
-  const norm = normalizeDate(date);
-  if (!norm) return false;
-
-  const d0 = new Date(`${norm}T00:00:00Z`); // D の UTC 0:00
-  const openStartUtc = new Date(d0.getTime() - 21 * HOUR); // D-1 12:00 JST
-  const closeAtUtc   = new Date(d0.getTime() + 3 * HOUR);  // D   12:00 JST
-  const nowUtc = new Date();
-
-  return nowUtc >= openStartUtc && nowUtc < closeAtUtc;
+// 休園日（週末・祝日・年末年始）
+export function isClosedDate(dateUtc: Date): boolean {
+  return isWeekendJst(dateUtc) || isYearEndJst(dateUtc) || isJapanHoliday(dateUtc);
 }
 
-/** 利用者の「預け希望時刻」から AM/PM を推定 */
-export function periodFromTime(time?: string | null): Period {
-  if (!time) return "am";
-  const h = Number(time.split(":")[0] ?? "9");
-  return h < 12 ? "am" : "pm";
+// 受付ウィンドウ：D-1 12:00(JST)〜D 12:00(JST) = UTC換算で D-1 03:00〜D 03:00
+export function withinBookingWindow(dateUtc: Date, nowUtc: Date = new Date()): boolean {
+  const y = dateUtc.getUTCFullYear();
+  const m = dateUtc.getUTCMonth();
+  const d = dateUtc.getUTCDate();
+  const openUtc  = new Date(Date.UTC(y, m, d - 1, 3, 0, 0));
+  const closeUtc = new Date(Date.UTC(y, m, d,     3, 0, 0));
+  return nowUtc >= openUtc && nowUtc <= closeUtc;
+}
+
+// 総合判定
+export function canAcceptForDate(dateUtc: Date, nowUtc: Date = new Date()) {
+  const closed = isClosedDate(dateUtc);
+  const within = withinBookingWindow(dateUtc, nowUtc);
+  return { closed, withinBookingWindow: within, canReserve: within && !closed };
+}
+
+// 枠（管理画面将来用）
+export function limitFor(slot?: TimeSlot | null): number {
+  if (slot === 'am') return LIMITS.am;
+  if (slot === 'pm') return LIMITS.pm;
+  return LIMITS.daily;
 }
