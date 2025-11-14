@@ -4,11 +4,11 @@ import { isJapanHoliday } from "@/lib/jpHolidays";
 export type Slot = "am" | "pm" | null;
 
 export const RULES = {
-  DAILY_LIMIT: 6,      // 1日の総上限
-  SLOT_LIMIT_AM: 6,    // 午前の内部上限（集計用）
-  SLOT_LIMIT_PM: 6,    // 午後の内部上限（集計用）
+  DAILY_LIMIT: 6,           // 1日の総上限
+  SLOT_LIMIT_AM: 6,         // 午前の内部上限（集計用）
+  SLOT_LIMIT_PM: 6,         // 午後の内部上限（集計用）
   COUNT_STATUSES: ["pending", "approved"] as const, // 定員に数えるステータス
-  AUTO_APPROVE_FIRST_N: 2, // 先着自動承認人数
+  AUTO_APPROVE_FIRST_N: 2,  // 先着自動承認人数（当日/前日ともに2名）
   BLOCK_DUP_SAME_CHILD_SAME_DAY: true,
   YEAR_END_CLOSED: [
     { m: 12, from: 29, to: 31 },
