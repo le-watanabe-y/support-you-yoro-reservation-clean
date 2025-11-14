@@ -5,10 +5,12 @@ import {
   LIMIT_DAILY,
   LIMIT_BY_PERIOD,
   COUNT_STATUSES,
-  normalizeDate,
+  AUTO_APPROVE_FIRST,
+  BLOCK_DUPLICATE_SAME_CHILD_SAME_DATE,
   withinOpenWindow,
   isClosedDate,
   isPeriod,
+  normalizeDate,
 } from "@/lib/reservationRules";
 
 export async function GET() {
@@ -27,7 +29,7 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
-    // 旧フィールド名も受け付けて吸収
+    // 旧フィールド名も吸収（guardianName 等）
     const guardian_name = body.guardian_name ?? body.guardianName ?? "";
     const email = (body.email ?? "").trim();
     const guardian_phone = body.guardian_phone ?? body.guardianPhone ?? null;
@@ -51,12 +53,11 @@ export async function POST(req: NextRequest) {
       errors.child_birthdate = "お子さまの生年月日は YYYY-MM-DD で入力してください。";
     if (!date) errors.date = "希望日は必須です。";
     if (!period) errors.period = "午前/午後を選択してください。";
-
     if (Object.keys(errors).length) {
       return NextResponse.json({ ok: false, message: "入力不備があります。", errors }, { status: 400 });
     }
 
-    // 受付期間＆休園日
+    // 受付期間（D-1 12:00〜D 12:00）＆ 休園日（平日＋年末年始）
     if (!withinOpenWindow(date)) {
       return NextResponse.json({ ok: false, message: "受付期間外の日付です。" }, { status: 400 });
     }
@@ -64,38 +65,37 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, message: "休園日のため予約できません。" }, { status: 400 });
     }
 
-    // 同一児童＆同日 重複チェック（pending/approved のみ）
-    const { count: dupCount, error: dupErr } = await supabaseAdmin
+    // 同一児童＆同日重複（pending/approved を対象に）
+    if (BLOCK_DUPLICATE_SAME_CHILD_SAME_DATE) {
+      const { count: dup, error: dupErr } = await supabaseAdmin
+        .from("reservations")
+        .select("id", { count: "exact", head: true })
+        .eq("date", date)
+        .eq("child_name", child_name)
+        .eq("child_birthdate", child_birthdate)
+        .in("status", COUNT_STATUSES as any);
+      if (dupErr) return NextResponse.json({ ok: false, message: dupErr.message }, { status: 500 });
+      if ((dup ?? 0) > 0) {
+        return NextResponse.json(
+          { ok: false, message: "同じお子さまの同日予約が既にあります。" },
+          { status: 409 }
+        );
+      }
+    }
+
+    // 定員チェック（当日合計 + 枠別）
+    const { data: rows, error: rowsErr } = await supabaseAdmin
       .from("reservations")
-      .select("id", { count: "exact", head: true })
+      .select("period,status")
       .eq("date", date)
-      .eq("child_name", child_name)
-      .eq("child_birthdate", child_birthdate)
       .in("status", COUNT_STATUSES as any);
 
-    if (dupErr) {
-      return NextResponse.json({ ok: false, message: dupErr.message }, { status: 500 });
-    }
-    if ((dupCount ?? 0) > 0) {
-      return NextResponse.json(
-        { ok: false, message: "同じお子さまの同日予約が既にあります。" },
-        { status: 409 }
-      );
+    if (rowsErr) {
+      return NextResponse.json({ ok: false, message: rowsErr.message }, { status: 500 });
     }
 
-    // 定員チェック（当日総数 + period）
-    const { data: todayRows, error: todayErr } = await supabaseAdmin
-      .from("reservations")
-      .select("period")
-      .eq("date", date)
-      .in("status", COUNT_STATUSES as any);
-
-    if (todayErr) {
-      return NextResponse.json({ ok: false, message: todayErr.message }, { status: 500 });
-    }
-
-    const total = todayRows?.length ?? 0;
-    const per = (todayRows ?? []).filter((r: any) => r.period === period).length;
+    const total = rows?.length ?? 0;
+    const per = (rows ?? []).filter((r: any) => r.period === period).length;
 
     if (total >= LIMIT_DAILY) {
       return NextResponse.json({ ok: false, message: "当日の定員に達しています。" }, { status: 409 });
@@ -107,7 +107,21 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, message: "午後の定員に達しています。" }, { status: 409 });
     }
 
-    // 登録（初期ステータスは pending）
+    // 自動承認：同一日で approved が AUTO_APPROVE_FIRST 未満なら approved、それ以外は pending
+    const { count: approvedCount, error: apprErr } = await supabaseAdmin
+      .from("reservations")
+      .select("id", { count: "exact", head: true })
+      .eq("date", date)
+      .eq("status", "approved");
+
+    if (apprErr) {
+      return NextResponse.json({ ok: false, message: apprErr.message }, { status: 500 });
+    }
+
+    const status: "approved" | "pending" =
+      (approvedCount ?? 0) < AUTO_APPROVE_FIRST ? "approved" : "pending";
+
+    // 登録
     const payload = {
       guardian_name,
       email,
@@ -117,7 +131,7 @@ export async function POST(req: NextRequest) {
       child_allergy,
       date,
       period,
-      status: "pending",
+      status,
       notes,
     };
 
@@ -131,7 +145,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
     }
 
-    return NextResponse.json({ ok: true, id: data.id });
+    return NextResponse.json({ ok: true, id: data.id, status: data.status });
   } catch (e: any) {
     return NextResponse.json({ ok: false, message: e?.message ?? "server error" }, { status: 500 });
   }
