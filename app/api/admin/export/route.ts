@@ -1,62 +1,58 @@
-// app/api/admin/export/route.ts
-import { NextRequest } from "next/server";
+// app/api/admin/export/route.ts  （全置き換え）
+import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const from = searchParams.get("from");
-  const to = searchParams.get("to");
-  const status = searchParams.get("status"); // "pending" | "approved" | "rejected" | "cancelled" | "all"
+export const runtime = "nodejs";
 
-  let query = supabaseAdmin
+function unauthorized() {
+  return new NextResponse("Unauthorized", {
+    status: 401,
+    headers: { "WWW-Authenticate": 'Basic realm="admin"' },
+  });
+}
+
+function okAuth(req: NextRequest): boolean {
+  const auth = req.headers.get("authorization") || "";
+  if (!auth.startsWith("Basic ")) return false;
+  try {
+    const [, b64] = auth.split(" ");
+    const decoded = Buffer.from(b64, "base64").toString();
+    const [user, pass] = decoded.split(":");
+    return user === process.env.ADMIN_USER && pass === process.env.ADMIN_PASS;
+  } catch {
+    return false;
+  }
+}
+
+export async function GET(req: NextRequest) {
+  if (!okAuth(req)) return unauthorized();
+
+  const s = supabaseAdmin();
+  const { data, error } = await s
     .from("reservations")
-    .select("*")
+    .select(
+      "id,created_at,preferred_date,dropoff_time,time_slot,status,guardian_name,email,child_name,child_birthdate,notes"
+    )
     .order("created_at", { ascending: false });
 
-  if (status && status !== "all") query = query.eq("status", status);
-  if (from) query = query.gte("date", from);
-  if (to) query = query.lte("date", to);
+  if (error) return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
 
-  const { data, error } = await query;
-  if (error) {
-    return new Response(JSON.stringify({ ok: false, message: error.message }), {
-      status: 500,
-      headers: { "content-type": "application/json" },
-    });
-  }
-
-  const headers = [
-    "id",
-    "created_at",
-    "guardian_name",
-    "email",
-    "guardian_phone",
-    "child_name",
-    "child_birthdate",
-    "child_allergy",
-    "date",
-    "period",
-    "status",
-    "notes",
-    "note",
+  const rows = data ?? [];
+  const header = [
+    "id","created_at","preferred_date","dropoff_time","time_slot","status",
+    "guardian_name","email","child_name","child_birthdate","notes"
   ];
+  const escape = (v: any) => {
+    const s = v == null ? "" : String(v).replace(/"/g, '""');
+    return `"${s}"`;
+    };
+  const csv = [header.join(","), ...rows.map(r => header.map(h => escape((r as any)[h])).join(","))].join("\n");
 
-  const esc = (v: any) => {
-    if (v === null || v === undefined) return "";
-    const s = String(v).replace(/"/g, '""');
-    return /[",\n]/.test(s) ? `"${s}"` : s;
-    // 改行やカンマを含む場合はダブルクォートで囲む
-  };
-
-  const csv = [headers.join(",")]
-    .concat((data ?? []).map((row: any) => headers.map((h) => esc(row[h])).join(",")))
-    .join("\n");
-
-  return new Response(csv, {
+  return new NextResponse(csv, {
+    status: 200,
     headers: {
-      "content-type": "text/csv; charset=utf-8",
-      "content-disposition": 'attachment; filename="reservations.csv"',
-      "cache-control": "no-store",
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="reservations.csv"`,
     },
   });
 }
