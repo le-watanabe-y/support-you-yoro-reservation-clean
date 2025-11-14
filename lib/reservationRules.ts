@@ -1,92 +1,143 @@
 // lib/reservationRules.ts
-// 予約ルール一式（JST基準）
+// 予約ルール／バリデーションの中核（JST基準）
+// - 祝日クローズ対応: isJapanHoliday() を使用
+// - ウィンドウ: 対象日 D の予約は D-1 12:00 ～ D 12:00 のみ受付
+// - 定員: 日合計 + 午前/午後
+// - 自動承認: 同一日 先着2名のみ approved、以降 pending
 
-import { isJapaneseHoliday } from "./holidays";
+import { isJapanHoliday } from "@/lib/jpholiday";
 
-export type Period = "am" | "pm";
+/* ====== ルール定数 ====== */
 
-// ===== 定員 =====
-export const LIMIT_DAILY = 6; // 1日の総上限
-export const LIMIT_BY_PERIOD: Record<Period, number> = { am: 6, pm: 6 }; // 午前/午後
+// 日合計上限
+export const LIMIT_DAILY = 6;
 
-// 定員に数えるステータス（b= pending + approved）
+// 枠上限（午前・午後）
+export const LIMIT_BY_PERIOD = { am: 6, pm: 6 } as const;
+
+// 定員カウント対象ステータス（b = pending + approved）
 export const COUNT_STATUSES = ["pending", "approved"] as const;
 
-// 当日/前日とも、同一日で先着 N 名は自動承認（approved）、以降は pending
-export const AUTO_APPROVE_FIRST_PER_DAY = 2;
+// 同一日で先着この人数までは自動承認（approved）
+export const AUTO_APPROVE_FIRST = 2;
 
-// 同一児童（氏名+生年月日）の同日重複をブロック
-export const BLOCK_DUP_SAME_CHILD_SAME_DATE = true;
+// 同じお子さま（氏名+生年月日）の同日申込をブロック
+export const BLOCK_DUPLICATE_SAME_CHILD_SAME_DATE = true;
 
-// 管理者バイパス（締切や休園日も通す）→ 無効のまま
+// 管理者バイパス（締切/休園でも登録可）— 今回は無効
 export const ADMIN_BYPASS = false;
 
-// ===== 受付ウインドウ =====
-// 対象日 D の予約は「D-1 12:00 〜 D 12:00（JST）」のみ受付
-export const BOOKING_WINDOW = {
-  openHour: 12,  // D-1 の 12:00 から受付
-  closeHour: 12, // D の 12:00 で締切（午後枠でも同じ）
-} as const;
+/* ====== 営業日・休園設定 ====== */
 
-// ===== 休園 =====
-export const CLOSED_WEEKDAYS = [0, 6] as const; // 0=日,6=土（＝土日）
-export const CLOSED_FIXED_RANGES = [
-  // 年末年始：12/29〜1/4（毎年）
-  { from: { month: 12, day: 29 }, to: { month: 1, day: 4 } },
-] as const;
-// 日本の祝日もクローズ（ON）
-export const USE_JP_HOLIDAYS = true;
+// 平日のみ受付（0=日 ... 6=土）
+const ALLOWED_WEEKDAYS = [1, 2, 3, 4, 5]; // 月〜金
 
-// ===== ヘルパ =====
-export function normalizeDate(s: string) {
-  return (s ?? "").slice(0, 10); // "YYYY-MM-DD"
+// 年末年始（毎年 12/29〜1/4）はクローズ
+const YEAR_END = { from: { month: 12, day: 29 }, to: { month: 1, day: 4 } } as const;
+
+/* ====== 受付ウィンドウ（JST） ======
+   対象日 D の予約は D-1 12:00 ～ D 12:00 に限る
+*/
+export function withinOpenWindow(dateStr: string, now = new Date()): boolean {
+  const target = parseJstDate(dateStr); // JST の 00:00
+  if (!target) return false;
+
+  // 予約可能なのは「当日(0)」と「翌日(1)」のみ
+  const delta = diffDaysJst(now, target);
+  if (delta < 0 || delta > 1) return false;
+
+  const open = openingTimeFor(target);  // D-1 12:00 JST
+  const close = closingTimeFor(target); // D   12:00 JST
+  return now >= open && now <= close;
 }
-export function isPeriod(v: any): v is Period {
-  return v === "am" || v === "pm";
-}
 
-// 休園日か？
+/* ====== 休園日判定（祝日対応を含む） ====== */
 export function isClosedDate(dateStr: string): boolean {
-  const n = normalizeDate(dateStr);
-  if (!n) return true;
+  const d = parseJstDate(dateStr);
+  if (!d) return true;
 
-  // 曜日（土日）
-  const d = new Date(n + "T00:00:00.000Z"); // UTCとして生成（下でJST換算）
-  const j = addHours(d, 9); // JST
-  const wd = j.getUTCDay(); // 0(日)〜6(土)
-  if ((CLOSED_WEEKDAYS as readonly number[]).includes(wd)) return true;
+  // 土日休園
+  if (!isAllowedWeekday(d)) return true;
 
-  // 年末年始（12/29〜1/4）
-  const [Y, M, D] = n.split("-").map(Number);
-  const cur = M * 100 + D;
-  const inDec = cur >= 1229 && cur <= 1231;
-  const inJan = cur >= 101 && cur <= 104;
-  if (inDec || inJan) return true;
+  // 年末年始休園（12/29〜1/4）
+  if (isYearEndClosed(d)) return true;
 
-  // 祝日
-  if (USE_JP_HOLIDAYS && isJapaneseHoliday(n)) return true;
+  // ★ 日本の祝日なら休園
+  if (isJapanHoliday(dateStr)) return true;
 
   return false;
 }
 
-// 受付ウインドウ判定：D-1 12:00 〜 D 12:00（JST）
-export function withinBookingWindow(targetDate: string, now: Date = new Date()): boolean {
-  const n = normalizeDate(targetDate);
-  if (!n) return false;
-  const [Y, M, D] = n.split("-").map(Number);
+/* ====== 補助 ====== */
 
-  // D-1 12:00 JST と D 12:00 JST を「UTCエポック」で作る
-  const open = jstDate(Y, M, D - 1, BOOKING_WINDOW.openHour, 0); // D-1 12:00 JST
-  const close = jstDate(Y, M, D, BOOKING_WINDOW.closeHour, 0);   // D   12:00 JST
-
-  return now >= open && now <= close;
+// "am" / "pm" の妥当性
+export function isPeriod(v: any): v is "am" | "pm" {
+  return v === "am" || v === "pm";
 }
 
-/* ====== 時刻ユーティリティ（JSTをUTCエポックで表現） ====== */
-function jstDate(y: number, m: number, d: number, h = 0, min = 0): Date {
-  // Date.UTC は月・日オーバーフローを自動補正（d=0 → 前月末日）してくれる
-  return new Date(Date.UTC(y, m - 1, d, h - 9, min));
+// "YYYY-MM-DD" を先頭10桁に正規化
+export function normalizeDate(s: string) {
+  return (s ?? "").slice(0, 10);
 }
-function addHours(base: Date, hours: number) {
-  return new Date(base.getTime() + hours * 60 * 60 * 1000);
+
+/* ====== JST ユーティリティ ====== */
+
+function toJst(d: Date) {
+  // NodeのデフォルトTZに依らず、JST(UTC+9)として扱いたいので9時間進めてUTC演算
+  return new Date(d.getTime() + 9 * 60 * 60 * 1000);
+}
+function fromJst(y: number, m: number, d: number, h = 0, min = 0) {
+  // JST指定をUTCに変換してDate化（hはJST時刻）
+  const utc = Date.UTC(y, m - 1, d, h - 9, min);
+  return new Date(utc);
+}
+function ymd(d: Date) {
+  const j = toJst(d);
+  return { y: j.getUTCFullYear(), m: j.getUTCMonth() + 1, d: j.getUTCDate() };
+}
+function startOfDayJst(d: Date) {
+  const { y, m, d: dd } = ymd(d);
+  return fromJst(y, m, dd, 0, 0);
+}
+function diffDaysJst(a: Date, b: Date) {
+  const A = startOfDayJst(a).getTime();
+  const B = startOfDayJst(b).getTime();
+  return Math.round((B - A) / (24 * 60 * 60 * 1000));
+}
+
+// D-1 の 12:00 JST
+function openingTimeFor(target: Date) {
+  const { y, m, d } = ymd(target);
+  const prev = new Date(fromJst(y, m, d).getTime() - 24 * 60 * 60 * 1000);
+  return fromJst(prev.getUTCFullYear(), prev.getUTCMonth() + 1, prev.getUTCDate(), 12, 0);
+}
+
+// D の 12:00 JST
+function closingTimeFor(target: Date) {
+  const { y, m, d } = ymd(target);
+  return fromJst(y, m, d, 12, 0);
+}
+
+function isAllowedWeekday(date: Date) {
+  const j = toJst(date);
+  const w = j.getUTCDay(); // 0=日 … 6=土
+  return ALLOWED_WEEKDAYS.includes(w);
+}
+
+function isYearEndClosed(date: Date) {
+  const j = toJst(date);
+  const m = j.getUTCMonth() + 1;
+  const d = j.getUTCDate();
+  const inDec = m === 12 && d >= YEAR_END.from.day;
+  const inJan = m === 1 && d <= YEAR_END.to.day;
+  return inDec || inJan;
+}
+
+// "YYYY-MM-DD" を JST の 00:00 として Date 生成（不正なら null）
+function parseJstDate(yyyy_mm_dd: string): Date | null {
+  const s = normalizeDate(yyyy_mm_dd);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m) return null;
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+  return fromJst(y, mo, d, 0, 0);
 }
