@@ -1,40 +1,42 @@
-import type { NextRequest } from 'next/server';
-import { NextResponse } from 'next/server';
+// middleware.ts
+import { NextRequest, NextResponse } from "next/server";
 
-// ここに一致するパスを保護します
-const PROTECTED = ['/admin', '/api/reservations', '/api/admin'];
+export const config = {
+  matcher: ["/admin/:path*", "/api/admin/:path*"],
+};
 
 export function middleware(req: NextRequest) {
-  const { pathname } = req.nextUrl;
+  const USER = process.env.ADMIN_USER;
+  const PASS = process.env.ADMIN_PASS;
+  if (!USER || !PASS) return NextResponse.next(); // 未設定なら通す（開発用）
 
-  // 対象パスかを判定
-  const needAuth = PROTECTED.some((p) => pathname === p || pathname.startsWith(`${p}/`));
-  if (!needAuth) return NextResponse.next();
-
-  const user = process.env.ADMIN_USER;
-  const pass = process.env.ADMIN_PASS;
-  // 環境変数未設定なら何もしない（必ず設定してください）
-  if (!user || !pass) return NextResponse.next();
-
-  const auth = req.headers.get('authorization') || '';
-  if (!auth.startsWith('Basic ')) {
-    return new NextResponse('Auth required', {
+  const auth = req.headers.get("authorization");
+  if (!auth?.startsWith("Basic ")) {
+    return new NextResponse("Auth required", {
       status: 401,
-      headers: { 'WWW-Authenticate': 'Basic realm="Secure Area"' },
+      headers: { "WWW-Authenticate": 'Basic realm="admin"' },
     });
   }
 
-  const [, base64] = auth.split(' ');
-  const [u, p] = Buffer.from(base64, 'base64').toString().split(':');
+  const b64 = auth.split(" ")[1] ?? "";
+  let u = "", p = "";
+  try {
+    const decoded = atob(b64);
+    const i = decoded.indexOf(":");
+    u = decoded.slice(0, i);
+    p = decoded.slice(i + 1);
+  } catch {
+    // 失敗時は 401
+    return new NextResponse("Unauthorized", {
+      status: 401,
+      headers: { "WWW-Authenticate": 'Basic realm="admin"' },
+    });
+  }
 
-  if (u === user && p === pass) return NextResponse.next();
+  if (u === USER && p === PASS) return NextResponse.next();
 
-  return new NextResponse('Unauthorized', {
+  return new NextResponse("Unauthorized", {
     status: 401,
-    headers: { 'WWW-Authenticate': 'Basic realm="Secure Area"' },
+    headers: { "WWW-Authenticate": 'Basic realm="admin"' },
   });
 }
-
-export const config = {
-  matcher: ['/admin/:path*', '/api/reservations', '/api/admin/:path*'],
-};
