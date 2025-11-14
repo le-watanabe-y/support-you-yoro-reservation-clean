@@ -1,101 +1,110 @@
 // lib/reservationRules.ts
-import { isJapaneseHoliday } from "@/lib/jpholiday";
+// 予約ルール（定員・受付ウィンドウ・休園日等）— JST 判定で統一
+import { isJapanHoliday } from "@/lib/jpholiday";
 
-/** ── ご指定の上限 ───────────────────────── */
-export const LIMIT_DAILY = 6;
-export const LIMIT_BY_PERIOD = { am: 6, pm: 6 } as const;
+/* === 運用設定（ヒアリング反映） ============================== */
+export const LIMIT_DAILY = 6 as const;                           // 1日の総上限
+export type TimeSlot = "am" | "pm";
+export const LIMIT_BY_PERIOD: Record<TimeSlot, number> = {       // am/pm 上限
+  am: 6,
+  pm: 6,
+};
+export const COUNT_STATUSES = ["pending", "approved"] as const;   // b：pending+approved をカウント
+export const AUTO_APPROVE_FIRST_PER_DAY = 2 as const;             // 先着2名は自動承認
+export const BLOCK_DUP_SAME_CHILD_SAME_DATE = true as const;      // 同日重複ブロック
+export const ADMIN_BYPASS = false as const;                       // 管理者バイパス無効
 
-/** 既存コード互換のまとめ */
+// 旧コード互換（LIMITS を参照している箇所のため）
 export const LIMITS = {
   daily: LIMIT_DAILY,
   am: LIMIT_BY_PERIOD.am,
   pm: LIMIT_BY_PERIOD.pm,
-};
+} as const;
+/* ============================================================= */
 
-/** 定員に数えるステータス（pending + approved） */
-export const COUNT_STATUSES = ["pending", "approved"] as const;
-
-const HOUR = 60 * 60 * 1000;
-
-/** "YYYY-MM-DD" を JST 時刻で Date 化（内部は UTC） */
-function jstDate(ymd: string, h = 0, m = 0): Date {
-  const [y, mm, dd] = ymd.split("-").map(Number);
-  return new Date(Date.UTC(y, (mm || 1) - 1, dd || 1, h - 9, m, 0));
+/** "YYYY-MM-DD" 正規化（不正なら空文字） */
+export function normalizeDate(input: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec((input ?? "").trim());
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : "";
 }
 
-/** Date | string を "YYYY-MM-DD" に正規化 */
-export function parseYmd(input: string | Date): string {
-  if (input instanceof Date) {
-    const y = input.getUTCFullYear();
-    const m = String(input.getUTCMonth() + 1).padStart(2, "0");
-    const d = String(input.getUTCDate()).padStart(2, "0");
-    return `${y}-${m}-${d}`;
-  }
-  return String(input).slice(0, 10);
+/** JST 正午の Date を得る */
+function jstMidday(ymd: string): Date {
+  return new Date(`${ymd}T12:00:00+09:00`);
 }
 
-/** 休園日か？（土日 / 祝日 / 12/29〜1/4） */
-export function isClosedDate(dateStr: string): boolean {
-  const d = jstDate(dateStr, 0, 0);
-  const dow = d.getUTCDay(); // 0:Sun ... 6:Sat（JST 基準）
+/** JST 任意時刻の Date を得る */
+function jstAt(ymd: string, hh = 0, mm = 0): Date {
+  const H = String(hh).padStart(2, "0");
+  const M = String(mm).padStart(2, "0");
+  return new Date(`${ymd}T${H}:${M}:00+09:00`);
+}
+
+/** Date → JST YYYY-MM-DD */
+function toJstYmd(d: Date): string {
+  const ms = d.getTime() + 9 * 60 * 60 * 1000;
+  const dj = new Date(ms);
+  const y = dj.getUTCFullYear();
+  const m = String(dj.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(dj.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** 年末年始（12/29〜1/4）休園 */
+function isYearEnd(d: Date): boolean {
+  const [, mm, dd] = toJstYmd(d).split("-").map(Number);
+  return (mm === 12 && dd >= 29) || (mm === 1 && dd <= 4);
+}
+
+/** 休園日（週末・祝日・年末年始） */
+export function isClosedDate(date: string | Date): boolean {
+  const ymd = typeof date === "string" ? normalizeDate(date) : toJstYmd(date);
+  if (!ymd) return true;
+  const mid = jstMidday(ymd);
+  const dow = mid.getUTCDay();              // Sun=0..Sat=6（JST 正午基準）
   const weekend = dow === 0 || dow === 6;
-
-  const [, m, day] = dateStr.split("-").map(Number);
-  const yearEndNewYear = (m === 12 && day >= 29) || (m === 1 && day <= 4);
-
-  const holiday = isJapaneseHoliday(dateStr);
-  return weekend || holiday || yearEndNewYear;
+  return weekend || isJapanHoliday(mid) || isYearEnd(mid);
 }
 
-/** 予約受付ウィンドウ：D-1 12:00 JST 〜 D 12:00 JST */
-export function withinBookingWindow(dateStr: string, now = new Date()): boolean {
-  const start = jstDate(dateStr, 12, 0); // D 12:00
-  start.setUTCDate(start.getUTCDate() - 1); // → D-1 12:00
-  const end = jstDate(dateStr, 12, 0); // D 12:00
+/** 受付ウィンドウ：D-1 12:00 〜 D 12:00（JST） */
+export function withinBookingWindow(dateStr: string): boolean {
+  const d = normalizeDate(dateStr);
+  if (!d) return false;
+
+  const start = (() => {
+    const mid = jstMidday(d);
+    mid.setUTCDate(mid.getUTCDate() - 1);
+    const startYmd = toJstYmd(mid);
+    return jstAt(startYmd, 12, 0).getTime();
+  })();
+  const end = jstAt(d, 12, 0).getTime(); // 終了は排他的
+
+  const now = Date.now();
   return now >= start && now < end;
 }
 
-/** その日を受け付けて良いか（ウィンドウ内 かつ 開園日） */
-export function canAcceptForDate(dateStr: string, now = new Date()): boolean {
-  return withinBookingWindow(dateStr, now) && !isClosedDate(dateStr);
+/** 利用者入力「HH:mm」→ 管理用の am / pm を推定 */
+export function toPeriodFromTime(t: string): TimeSlot {
+  const m = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec((t ?? "").trim());
+  if (!m) return "am";
+  const h = Number(m[1]);
+  return h < 12 ? "am" : "pm";
 }
 
-/** 利用者の「預け希望時刻」→ AM/PM 判定（12:00 未満 = AM） */
-export type Period = "am" | "pm";
-export function periodFromTime(time?: string | null): Period {
-  if (!time) return "am";
-  const [hh] = String(time).split(":").map(Number);
-  return Number(hh) >= 12 ? "pm" : "am";
+/* === 既存コード互換の名称でエクスポート ======================= */
+export const parseYmd = normalizeDate;                        // 既存 import 互換
+export function canAcceptForDate(dateStr: string): boolean {  // 既存 import 互換
+  return !isClosedDate(dateStr) && withinBookingWindow(dateStr);
 }
-
-/** 指定日の上限値（総量 + 枠別） */
-export function limitFor(
-  dateStr: string,
-  time?: string | null
-): { daily: number; period: number; periodKey: Period } {
-  const key = periodFromTime(time);
-  return { daily: LIMIT_DAILY, period: LIMIT_BY_PERIOD[key], periodKey: key };
+export function limitFor(period?: TimeSlot | null): number {  // 既存 import 互換
+  return period ? LIMIT_BY_PERIOD[period] : LIMIT_DAILY;
 }
-
-/**
- * 自動承認か？（当日/前日の“先着2名”を自動承認）
- * 既存コードの呼び出しに合わせるため any 受けにして安全側で解釈。
- */
-export function shouldAutoApprove(
-  currentApprovedOrCount: number,
-  maybePending?: number
-): boolean {
-  const counted =
-    typeof maybePending === "number"
-      ? currentApprovedOrCount + maybePending
-      : currentApprovedOrCount;
-  return counted < 2;
+/** その日の「既に承認済みの人数」を受け取り、先着2名なら true */
+export function shouldAutoApprove(approvedCountForDay: number): boolean {
+  return approvedCountForDay < AUTO_APPROVE_FIRST_PER_DAY;
 }
-
-/** Date → JST の "YYYY-MM-DD" 文字列（参考/互換） */
-export function ymdJST(d: Date): string {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+/** 旧名互換：slotFromTimeStr → toPeriodFromTime */
+export function slotFromTimeStr(time: string): TimeSlot {
+  return toPeriodFromTime(time);
 }
+/* ============================================================= */
