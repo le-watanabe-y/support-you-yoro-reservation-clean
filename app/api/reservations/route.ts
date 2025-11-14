@@ -1,8 +1,15 @@
 // app/api/reservations/route.ts
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-
-const COUNT_STATUSES = ["pending", "approved"] as const;
+import {
+  LIMIT_DAILY,
+  LIMIT_BY_PERIOD,
+  COUNT_STATUSES,
+  normalizeDate,
+  withinOpenWindow,
+  isClosedDate,
+  isPeriod,
+} from "@/lib/reservationRules";
 
 export async function GET() {
   const { data, error } = await supabaseAdmin
@@ -10,83 +17,122 @@ export async function GET() {
     .select("*")
     .order("created_at", { ascending: false });
 
-  if (error) return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
+  if (error) {
+    return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
+  }
   return NextResponse.json({ ok: true, items: data ?? [] });
 }
 
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const {
-      guardianName,
-      email,
-      preferredDate,
-      notes,
-      childName,
-      childBirthdate,
-      childAllergy,
-      guardianPhone,
-    } = body ?? {};
 
-    if (!guardianName || !email || !preferredDate) {
-      return NextResponse.json(
-        { ok: false, message: "必須項目（保護者名 / メール / 希望日）が足りません" },
-        { status: 400 },
-      );
+    // 旧フィールド名も受け付けて吸収
+    const guardian_name = body.guardian_name ?? body.guardianName ?? "";
+    const email = (body.email ?? "").trim();
+    const guardian_phone = body.guardian_phone ?? body.guardianPhone ?? null;
+
+    const child_name = body.child_name ?? body.childName ?? "";
+    const child_birthdate = body.child_birthdate ?? body.childBirthdate ?? "";
+    const child_allergy = body.child_allergy ?? body.childAllergy ?? null;
+
+    const date = normalizeDate(body.date ?? body.preferredDate ?? "");
+    const periodRaw = (body.period ?? body.timeSlot ?? "").toLowerCase();
+    const period = isPeriod(periodRaw) ? periodRaw : "";
+
+    const notes = body.notes ?? body.note ?? null;
+
+    // 必須チェック
+    const errors: Record<string, string> = {};
+    if (!guardian_name) errors.guardian_name = "保護者名は必須です。";
+    if (!email || !/^\S+@\S+\.\S+$/.test(email)) errors.email = "メール形式が不正です。";
+    if (!child_name) errors.child_name = "お子さまの氏名は必須です。";
+    if (!child_birthdate || !/^\d{4}-\d{2}-\d{2}$/.test(child_birthdate))
+      errors.child_birthdate = "お子さまの生年月日は YYYY-MM-DD で入力してください。";
+    if (!date) errors.date = "希望日は必須です。";
+    if (!period) errors.period = "午前/午後を選択してください。";
+
+    if (Object.keys(errors).length) {
+      return NextResponse.json({ ok: false, message: "入力不備があります。", errors }, { status: 400 });
     }
 
-    // 定員取得
-    const { data: capRow } = await supabaseAdmin
-      .from("capacities")
-      .select("capacity")
-      .eq("day", preferredDate)
-      .maybeSingle();
+    // 受付期間＆休園日
+    if (!withinOpenWindow(date)) {
+      return NextResponse.json({ ok: false, message: "受付期間外の日付です。" }, { status: 400 });
+    }
+    if (isClosedDate(date)) {
+      return NextResponse.json({ ok: false, message: "休園日のため予約できません。" }, { status: 400 });
+    }
 
-    const fallback = Number(process.env.DEFAULT_DAILY_CAPACITY ?? "0");
-    const capacity = capRow?.capacity ?? fallback;
-
-    // その日の予約数（pending + approved）
-    const { count, error: cntErr } = await supabaseAdmin
+    // 同一児童＆同日 重複チェック（pending/approved のみ）
+    const { count: dupCount, error: dupErr } = await supabaseAdmin
       .from("reservations")
       .select("id", { count: "exact", head: true })
-      .eq("preferred_date", preferredDate)
-      .in("status", COUNT_STATUSES as unknown as string[]);
+      .eq("date", date)
+      .eq("child_name", child_name)
+      .eq("child_birthdate", child_birthdate)
+      .in("status", COUNT_STATUSES as any);
 
-    if (cntErr) {
-      return NextResponse.json({ ok: false, message: cntErr.message }, { status: 500 });
+    if (dupErr) {
+      return NextResponse.json({ ok: false, message: dupErr.message }, { status: 500 });
     }
-
-    const booked = count ?? 0;
-    if (capacity > 0 && booked >= capacity) {
+    if ((dupCount ?? 0) > 0) {
       return NextResponse.json(
-        { ok: false, message: "この日は満席です。別の日をご選択ください。" },
-        { status: 409 },
+        { ok: false, message: "同じお子さまの同日予約が既にあります。" },
+        { status: 409 }
       );
     }
 
-    // 登録（初期状態は pending）
+    // 定員チェック（当日総数 + period）
+    const { data: todayRows, error: todayErr } = await supabaseAdmin
+      .from("reservations")
+      .select("period")
+      .eq("date", date)
+      .in("status", COUNT_STATUSES as any);
+
+    if (todayErr) {
+      return NextResponse.json({ ok: false, message: todayErr.message }, { status: 500 });
+    }
+
+    const total = todayRows?.length ?? 0;
+    const per = (todayRows ?? []).filter((r: any) => r.period === period).length;
+
+    if (total >= LIMIT_DAILY) {
+      return NextResponse.json({ ok: false, message: "当日の定員に達しています。" }, { status: 409 });
+    }
+    if (period === "am" && per >= LIMIT_BY_PERIOD.am) {
+      return NextResponse.json({ ok: false, message: "午前の定員に達しています。" }, { status: 409 });
+    }
+    if (period === "pm" && per >= LIMIT_BY_PERIOD.pm) {
+      return NextResponse.json({ ok: false, message: "午後の定員に達しています。" }, { status: 409 });
+    }
+
+    // 登録（初期ステータスは pending）
+    const payload = {
+      guardian_name,
+      email,
+      guardian_phone,
+      child_name,
+      child_birthdate,
+      child_allergy,
+      date,
+      period,
+      status: "pending",
+      notes,
+    };
+
     const { data, error } = await supabaseAdmin
       .from("reservations")
-      .insert({
-        guardian_name: guardianName,
-        email,
-        preferred_date: preferredDate,
-        notes: notes ?? "",
-        status: "pending",
-        child_name: childName ?? null,
-        child_birthdate: childBirthdate ?? null,
-        child_allergy: childAllergy ?? null,
-        guardian_phone: guardianPhone ?? null,
-      })
-      .select()
-      .maybeSingle();
+      .insert([payload])
+      .select("*")
+      .single();
 
     if (error) {
       return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
     }
 
-    return NextResponse.json({ ok: true, id: data?.id ?? null }, { status: 201 });
+    return NextResponse.json({ ok: true, id: data.id });
   } catch (e: any) {
-    return NextResponse.json({ ok: false, message: e?.message ?? "failed" }, { status: 500 });
+    return NextResponse.json({ ok: false, message: e?.message ?? "server error" }, { status: 500 });
   }
 }
