@@ -1,3 +1,4 @@
+import { NextResponse } from 'next/server';
 import { supabaseAdmin, type ReservationRow } from '@/lib/supabaseAdmin';
 
 function escapeCsv(v: unknown) {
