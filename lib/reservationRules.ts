@@ -1,103 +1,58 @@
 // lib/reservationRules.ts
-import { isJpHoliday } from "@/lib/jpHolidays";
+import { isJapanHoliday } from "@/lib/holidayJP";
 
-/** 回答いただいた運用値 */
+// —— 予約上限（ご指定値）
 export const LIMIT_DAILY = 6;
 export const LIMIT_BY_PERIOD = { am: 6, pm: 6 } as const;
-export const COUNT_STATUSES = ["pending", "approved"] as const; // b: pending+approved
-export const AUTO_APPROVE_FIRST = 2; // 先着2名自動承認
-export const BLOCK_DUPLICATE_SAME_CHILD_SAME_DATE = true;
-export const ADMIN_BYPASS = false;
+export type Period = keyof typeof LIMIT_BY_PERIOD;
 
-/** 午前/午後の境界（JST 12:00） */
-export type TimeSlot = "am" | "pm";
-export const SLOT_BOUNDARY_MINUTE = 12 * 60;
+// 受付ウィンドウ：利用日 D の予約は D-1 12:00 ～ D 12:00（JST）
+const HOUR = 60 * 60 * 1000;
+const JST_OFFSET = 9 * HOUR;
 
-/** 利用者入力の「預け希望時刻」(HH:MM) を am/pm に丸める */
-export function toTimeSlotByDropoff(hhmm?: string | null): TimeSlot | null {
-  if (!hhmm) return null;
-  const m = /^(\d{2}):(\d{2})$/.exec(hhmm.trim());
-  if (!m) return null;
-  const minutes = Number(m[1]) * 60 + Number(m[2]);
-  return minutes < SLOT_BOUNDARY_MINUTE ? "am" : "pm";
+// UTC Date -> JST "YYYY-MM-DD"
+function ymdJST(d: Date): string {
+  const j = new Date(d.getTime() + JST_OFFSET);
+  const y = j.getUTCFullYear();
+  const m = String(j.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(j.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
-// 平日のみ開園（0=Sun ... 6=Sat）
-const ALLOWED_WEEKDAYS = [1, 2, 3, 4, 5];
-
-/** 年末年始 12/29〜1/4 は閉園 */
-function isYearEndClosed(date: Date) {
-  const j = toJst(date);
-  const m = j.getUTCMonth() + 1;
-  const d = j.getUTCDate();
-  return (m === 12 && d >= 29) || (m === 1 && d <= 4);
+/** "YYYY-MM-DD" 以外は空文字 */
+export function normalizeDate(s: string): string {
+  const t = (s ?? "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(t) ? t : "";
 }
 
-export function normalizeDate(s: string) {
-  return (s ?? "").slice(0, 10);
+/** 年末年始休園（12/29–1/4, JST） */
+export function isYearEnd(dateUtc: Date): boolean {
+  const [_, mm, dd] = ymdJST(dateUtc).split("-").map(Number);
+  return (mm === 12 && dd >= 29) || (mm === 1 && dd <= 4);
 }
 
-/** 土日・祝日・年末年始を閉園扱い */
-export function isClosedDate(dateStr: string): boolean {
-  const d = parseJstDate(dateStr);
-  if (!d) return true;
-
-  const dow = toJst(d).getUTCDay();
-  const weekend = !ALLOWED_WEEKDAYS.includes(dow);      // 土日
-  const holiday = isJpHoliday(normalizeDate(dateStr));   // 祝日（文字列で判定）
-  if (weekend || holiday || isYearEndClosed(d)) return true;
-
-  return false;
+/** 土日（JST） */
+export function isWeekend(dateUtc: Date): boolean {
+  const j = new Date(dateUtc.getTime() + JST_OFFSET);
+  const dow = j.getUTCDay(); // 0:日, 6:土
+  return dow === 0 || dow === 6;
 }
 
-/** 受付ウィンドウ：D-1 12:00 〜 D 12:00（JST） */
-export function withinOpenWindow(dateStr: string, now = new Date()): boolean {
-  const target = parseJstDate(dateStr);
-  if (!target) return false;
-
-  const delta = diffDaysJst(now, target); // 0=当日, 1=前日
-  if (delta < 0 || delta > 1) return false;
-
-  const open = openingTimeFor(target);   // D-1 12:00
-  const close = closingTimeFor(target);  // D   12:00
-  return now >= open && now <= close;
+/** 休園（週末 / 祝日 / 年末年始） */
+export function isClosedDate(date: string | Date): boolean {
+  const d = typeof date === "string" ? new Date(`${date}T00:00:00Z`) : date;
+  return isWeekend(d) || isJapanHoliday(d) || isYearEnd(d);
 }
 
-/** 先着N名まで自動承認（N=AUTO_APPROVE_FIRST） */
-export function decideInitialStatus(currentTotalCount: number): "approved" | "pending" {
-  return currentTotalCount < AUTO_APPROVE_FIRST ? "approved" : "pending";
-}
+/** 受付ウィンドウ（JST：D-1 12:00 ～ D 12:00）に入っているか */
+export function withinOpenWindow(date: string): boolean {
+  const norm = normalizeDate(date);
+  if (!norm) return false;
 
-/* ===== JST utils ===== */
-function toJst(d: Date) { return new Date(d.getTime() + 9 * 60 * 60 * 1000); }
-function fromJst(y: number, m: number, d: number, h = 0, min = 0) {
-  const utc = Date.UTC(y, m - 1, d, h - 9, min);
-  return new Date(utc);
-}
-function ymd(d: Date) {
-  const j = toJst(d);
-  return { y: j.getUTCFullYear(), m: j.getUTCMonth() + 1, d: j.getUTCDate() };
-}
-function startOfDayJst(d: Date) {
-  const { y, m, d: dd } = ymd(d);
-  return fromJst(y, m, dd, 0, 0);
-}
-function diffDaysJst(a: Date, b: Date) {
-  const A = startOfDayJst(a).getTime();
-  const B = startOfDayJst(b).getTime();
-  return Math.round((B - A) / (24 * 60 * 60 * 1000));
-}
-function openingTimeFor(target: Date) {
-  const { y, m, d } = ymd(target);
-  const prev = new Date(fromJst(y, m, d).getTime() - 24 * 60 * 60 * 1000);
-  return fromJst(prev.getUTCFullYear(), prev.getUTCMonth() + 1, prev.getUTCDate(), 12, 0);
-}
-function closingTimeFor(target: Date) {
-  const { y, m, d } = ymd(target);
-  return fromJst(y, m, d, 12, 0);
-}
-function parseJstDate(s: string): Date | null {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(normalizeDate(s));
-  if (!m) return null;
-  return fromJst(+m[1], +m[2], +m[3], 0, 0);
+  const d0 = new Date(`${norm}T00:00:00Z`); // D の UTC 0:00
+  const openStartUtc = new Date(d0.getTime() - 21 * HOUR); // D-1 12:00 JST
+  const closeAtUtc   = new Date(d0.getTime() + 3 * HOUR);  // D   12:00 JST
+  const nowUtc = new Date();
+
+  return nowUtc >= openStartUtc && nowUtc < closeAtUtc;
 }
