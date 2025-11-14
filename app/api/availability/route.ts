@@ -1,85 +1,52 @@
-// app/api/availability/route.ts
-import { NextResponse, NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { withinBookingWindow, isClosedDate, deriveSlotFromTime, RULES } from "@/lib/reservationRules";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import {
-  normalizeDate,
-  isClosedDate,
-  withinOpenWindow,
-  LIMIT_DAILY,
-  LIMIT_BY_PERIOD,
-  type Period,
-} from "@/lib/reservationRules";
-
-const COUNT_STATUSES = ["pending", "approved"]; // 定員に数えるステータス（ご指定 b）
-
-function periodFromTime(time?: string | null): Period {
-  if (!time) return "am";
-  const h = Number(time.split(":")[0] ?? "9");
-  return h < 12 ? "am" : "pm";
-}
 
 export async function GET(req: NextRequest) {
-  const url = new URL(req.url);
-  const dateParam = url.searchParams.get("date") ?? "";
-  const timeParam = url.searchParams.get("time"); // "HH:mm"（任意）
+  const { searchParams } = new URL(req.url);
+  const date = searchParams.get("date"); // YYYY-MM-DD
+  const time = searchParams.get("time"); // HH:MM（任意）
 
-  const date = normalizeDate(dateParam);
-  if (!date) {
-    return NextResponse.json({ ok: false, message: "date=YYYY-MM-DD を指定してください" }, { status: 400 });
-  }
+  if (!date) return NextResponse.json({ ok: false, message: "date is required" }, { status: 400 });
 
   const closed = isClosedDate(date);
-  const withinWindow = withinOpenWindow(date);
+  const within = withinBookingWindow(date);
 
-  // まずは closed / withinWindow を早期返却可能
-  if (closed || !withinWindow) {
-    return NextResponse.json({
-      ok: true,
-      date,
-      closed,
-      withinWindow,
-      canReserve: false,
-      reason: closed ? "closed" : "out_of_window",
-    });
+  let canReserve = false;
+
+  if (!closed && within) {
+    const slot = deriveSlotFromTime(time);
+
+    const { data, error } = await supabaseAdmin
+      .from("reservations")
+      .select("id,status,dropoff_time")
+      .eq("preferred_date", date)
+      .in("status", RULES.COUNT_STATUSES as any);
+
+    if (error) return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
+
+    const total = data.length;
+    const dailyLeft = Math.max(RULES.DAILY_LIMIT - total, 0);
+
+    let slotLeft: number | null = null;
+    if (slot) {
+      const inSlot = data.filter(r => {
+        const hhmm = (r as any).dropoff_time as string | null;
+        return deriveSlotFromTime(hhmm) === slot;
+      }).length;
+      const limit = slot === "am" ? RULES.SLOT_LIMIT_AM : RULES.SLOT_LIMIT_PM;
+      slotLeft = Math.max(limit - inSlot, 0);
+    }
+
+    canReserve = dailyLeft > 0 && (slotLeft === null || slotLeft > 0);
   }
-
-  const p = periodFromTime(timeParam);
-
-  // ---- 定員計算（daily / period）-------------------------------------------
-  // daily
-  const daily = await supabaseAdmin
-    .from("reservations")
-    .select("id", { count: "exact", head: true })
-    .eq("date", date)
-    .in("status", COUNT_STATUSES);
-  const dailyCount = daily.count ?? 0;
-
-  // period（dropoff_time < 12:00 を AM とみなす /  >= 12:00 を PM）
-  const periodExpr =
-    p === "am" ? "dropoff_time.lt.12:00,time_slot.eq.am" : "dropoff_time.gte.12:00,time_slot.eq.pm";
-  const per = await supabaseAdmin
-    .from("reservations")
-    .select("id", { count: "exact", head: true })
-    .eq("date", date)
-    .in("status", COUNT_STATUSES)
-    .or(periodExpr);
-  const periodCount = per.count ?? 0;
-
-  const remainDaily = Math.max(0, LIMIT_DAILY - dailyCount);
-  const remainPeriod = Math.max(0, LIMIT_BY_PERIOD[p] - periodCount);
-  const canReserve = remainDaily > 0 && remainPeriod > 0;
 
   return NextResponse.json({
     ok: true,
     date,
-    time: timeParam ?? null,
-    period: p,
+    time,
     closed,
-    withinWindow,
+    withinBookingWindow: within,
     canReserve,
-    capacity: {
-      daily: { used: dailyCount, limit: LIMIT_DAILY, remain: remainDaily },
-      [p]:   { used: periodCount, limit: LIMIT_BY_PERIOD[p], remain: remainPeriod },
-    },
   });
 }
