@@ -1,9 +1,20 @@
-// app/api/admin/reservations/[id]/route.ts  （全置き換え）
-import { NextRequest, NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
-
+// app/api/admin/reservations/[id]/route.ts
 export const runtime = "nodejs";
 
+import { NextRequest, NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin"; // ← 関数ではなく“クライアント”
+
+// Basic 認証（Vercel環境変数 ADMIN_USER / ADMIN_PASS）
+function basicAuthOK(req: NextRequest): boolean {
+  const h = req.headers.get("authorization") ?? "";
+  if (!h.startsWith("Basic ")) return false;
+  const decoded = Buffer.from(h.slice(6), "base64").toString("utf8"); // "user:pass"
+  const i = decoded.indexOf(":");
+  if (i < 0) return false;
+  const user = decoded.slice(0, i);
+  const pass = decoded.slice(i + 1);
+  return user === process.env.ADMIN_USER && pass === process.env.ADMIN_PASS;
+}
 function unauthorized() {
   return new NextResponse("Unauthorized", {
     status: 401,
@@ -11,57 +22,38 @@ function unauthorized() {
   });
 }
 
-function okAuth(req: NextRequest): boolean {
-  const auth = req.headers.get("authorization") || "";
-  if (!auth.startsWith("Basic ")) return false;
-  try {
-    const [, b64] = auth.split(" ");
-    const decoded = Buffer.from(b64, "base64").toString();
-    const [user, pass] = decoded.split(":");
-    return user === process.env.ADMIN_USER && pass === process.env.ADMIN_PASS;
-  } catch {
-    return false;
-  }
-}
-
-function periodFromTime(hhmm: string): "am" | "pm" {
-  const hh = Number((hhmm || "00:00").split(":")[0] || 0);
-  return hh < 12 ? "am" : "pm";
-}
+const ALLOWED = ["approved", "rejected"] as const;
+type Status = (typeof ALLOWED)[number];
 
 export async function PATCH(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  if (!okAuth(req)) return unauthorized();
+  if (!basicAuthOK(req)) return unauthorized();
 
-  const id = params.id;
-  const body = await req.json().catch(() => ({} as any));
-
-  const updates: Record<string, any> = {};
-  if (
-    typeof body.status === "string" &&
-    ["pending", "approved", "rejected", "canceled"].includes(body.status)
-  ) {
-    updates.status = body.status;
-  }
-  if (typeof body.dropoff_time === "string") {
-    if (!/^\d{2}:\d{2}$/.test(body.dropoff_time)) {
-      return NextResponse.json(
-        { ok: false, message: "dropoff_time は HH:MM で指定してください" },
-        { status: 400 }
-      );
-    }
-    updates.dropoff_time = body.dropoff_time;
-    updates.time_slot = periodFromTime(body.dropoff_time);
+  let body: any;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ ok: false, message: "Invalid JSON" }, { status: 400 });
   }
 
-  if (Object.keys(updates).length === 0) {
-    return NextResponse.json({ ok: false, message: "更新対象がありません" }, { status: 400 });
+  const status = body?.status as Status;
+  if (!ALLOWED.includes(status)) {
+    return NextResponse.json(
+      { ok: false, message: 'status must be "approved" or "rejected"' },
+      { status: 400 }
+    );
   }
 
-  const s = supabaseAdmin();
-  const { error } = await s.from("reservations").update(updates).eq("id", id);
+  const s = supabaseAdmin; // ← ここは “supabaseAdmin()” と呼ばない
+  const { data, error } = await s
+    .from("reservations")
+    .update({ status })
+    .eq("id", params.id)
+    .select("*")
+    .single();
+
   if (error) return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, item: data });
 }
