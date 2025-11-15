@@ -3,104 +3,129 @@ export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import {
-  COUNT_STATUSES,
-  LIMIT_DAILY,
-  LIMIT_BY_PERIOD,
-  toPeriodFromTime,
-  canAcceptForDate,
-  shouldAutoApprove,
-} from "@/lib/reservationRules";
+import { isClosedDate, withinBookingWindow, toPeriodFromTime } from "@/lib/reservationRules";
 
-// GET: 予約一覧
+// ---- ユーティリティ ----
+function nowJST(): Date {
+  return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
+}
+function ymd(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
+}
+function addDays(d: Date, n: number): Date {
+  const c = new Date(d);
+  c.setDate(c.getDate() + n);
+  return c;
+}
+function isTimeHHMM(v: string): boolean {
+  return /^\d{2}:\d{2}$/.test(v);
+}
+
+// ---- GET: 一覧（既存挙動） ----
 export async function GET() {
-  const { data, error } = await supabaseAdmin
+  const s = supabaseAdmin;
+  const { data, error } = await s
     .from("reservations")
     .select("*")
     .order("created_at", { ascending: false });
 
-  if (error) {
-    return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
-  }
+  if (error) return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
   return NextResponse.json({ ok: true, items: data ?? [] });
 }
 
-// POST: 予約登録
+// ---- POST: 予約登録（本実装） ----
 export async function POST(req: NextRequest) {
-  const body = await req.json();
+  // ① 入力パース & バリデーション
+  let body: any;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ ok: false, message: "invalid json" }, { status: 400 });
+  }
 
-  const guardian_name = body?.guardianName ?? body?.guardian_name ?? "";
-  const email = body?.email ?? null;
-  const child_name = body?.childName ?? body?.child_name ?? null;
-  const child_birthdate = body?.childBirthdate ?? body?.child_birthdate ?? null;
-  const preferred_date = body?.preferredDate ?? body?.preferred_date ?? "";
-  const dropoff_time = body?.dropoffTime ?? body?.dropoff_time ?? null;
+  const guardianName = String(body?.guardianName || "").trim();
+  const email = String(body?.email || "").trim();
+  const childName = body?.childName ? String(body.childName).trim() : null;
+  const childBirthdate = body?.childBirthdate ? String(body.childBirthdate).trim() : null; // "YYYY-MM-DD" or null
+  const preferredDate = String(body?.preferredDate || "").trim(); // "YYYY-MM-DD"
+  const dropoffTime = String(body?.dropoffTime || "").trim();     // "HH:MM"
 
-  if (!guardian_name || !preferred_date) {
+  if (!guardianName || !email || !preferredDate || !dropoffTime) {
+    return NextResponse.json({ ok: false, message: "必須項目が不足しています" }, { status: 400 });
+  }
+  if (!isTimeHHMM(dropoffTime)) {
+    return NextResponse.json({ ok: false, message: "時刻の形式が不正です（HH:MM）" }, { status: 400 });
+  }
+
+  // ② 正午ルールの受付対象日チェック（JST）
+  const now = nowJST();
+  const today = ymd(now);
+  const tomorrow = ymd(addDays(now, 1));
+  const hour = now.getHours();
+  const shouldBe = hour < 12 ? today : tomorrow; // 00:00–11:59 → 本日 / 12:00–24:00 → 翌日
+  if (preferredDate !== shouldBe) {
     return NextResponse.json(
-      { ok: false, message: "必須項目（保護者氏名 / 利用日）が不足しています。" },
+      { ok: false, message: "現在はこの日の予約受付時間外です（正午ルール）" },
       { status: 400 }
     );
   }
 
-  // 受付ウィンドウ & 休園日チェック
-  if (!canAcceptForDate(preferred_date)) {
-    return NextResponse.json(
-      { ok: false, message: "休園日/受付時間外のため予約できません。" },
-      { status: 400 }
-    );
+  // ③ 休園日・受付ウィンドウ（D-1 12:00 ～ D 12:00）チェック
+  if (isClosedDate(preferredDate)) {
+    return NextResponse.json({ ok: false, message: "休園日のためご予約できません" }, { status: 400 });
+  }
+  if (!withinBookingWindow(preferredDate)) {
+    return NextResponse.json({ ok: false, message: "現在は受付時間外です" }, { status: 400 });
   }
 
-  const period = toPeriodFromTime(dropoff_time); // 'am' | 'pm'
+  // ④ 定員状況（当日合算）を確認
+  const DAILY_LIMIT = 6;          // 1日の上限
+  const AUTO_APPROVE_FIRST = 2;   // 先着2名は自動承認
+  const COUNT_STATUSES = ["pending", "approved"] as const;
 
-  // 日の使用数（pending+approved）
-  const { count: dayUsed, error: dayErr } = await supabaseAdmin
+  const s = supabaseAdmin;
+
+  const { count: dailyCount, error: countErr } = await s
     .from("reservations")
     .select("id", { count: "exact", head: true })
-    .eq("preferred_date", preferred_date)
-    .in("status", COUNT_STATUSES as any);
+    .eq("preferred_date", preferredDate)
+    .in("status", COUNT_STATUSES as unknown as string[]);
 
-  if (dayErr) return NextResponse.json({ ok: false, message: dayErr.message }, { status: 500 });
-  if ((dayUsed ?? 0) >= LIMIT_DAILY) {
-    return NextResponse.json({ ok: false, message: "1日の上限に達しました。" }, { status: 409 });
+  if (countErr) {
+    return NextResponse.json({ ok: false, message: countErr.message }, { status: 500 });
+  }
+  if ((dailyCount ?? 0) >= DAILY_LIMIT) {
+    return NextResponse.json({ ok: false, message: "本日は満員です" }, { status: 409 });
   }
 
-  // 枠（AM/PM）の使用数（pending+approved）
-  const { count: periodUsed, error: perErr } = await supabaseAdmin
-    .from("reservations")
-    .select("id", { count: "exact", head: true })
-    .eq("preferred_date", preferred_date)
-    .eq("time_slot", period)
-    .in("status", COUNT_STATUSES as any);
+  // ⑤ 自動承認 or 待機（pending）
+  const status: "approved" | "pending" = (dailyCount ?? 0) < AUTO_APPROVE_FIRST ? "approved" : "pending";
+  const time_slot = toPeriodFromTime(dropoffTime); // "am" | "pm"
 
-  if (perErr) return NextResponse.json({ ok: false, message: perErr.message }, { status: 500 });
-  if ((periodUsed ?? 0) >= LIMIT_BY_PERIOD[period]) {
-    return NextResponse.json({ ok: false, message: "該当時間帯の上限に達しました。" }, { status: 409 });
-  }
-
-  // 自動承認（approvedの件数のみを参照）
-  const { count: approvedCount, error: appErr } = await supabaseAdmin
-    .from("reservations")
-    .select("id", { count: "exact", head: true })
-    .eq("preferred_date", preferred_date)
-    .eq("status", "approved");
-
-  if (appErr) return NextResponse.json({ ok: false, message: appErr.message }, { status: 500 });
-  const status = shouldAutoApprove(approvedCount ?? 0) ? "approved" : "pending";
-
-  const insert = {
-    guardian_name,
+  // ⑥ 登録（同日・同児童の重複はDBユニーク制約で弾かれる）
+  const insertRow = {
+    guardian_name: guardianName,
     email,
-    child_name,
-    child_birthdate,
-    preferred_date,
-    dropoff_time,
-    time_slot: period,
+    child_name: childName,
+    child_birthdate: childBirthdate, // date列。文字列 "YYYY-MM-DD" をそのまま渡してOK
+    preferred_date: preferredDate,
+    dropoff_time: dropoffTime,
+    time_slot,
     status,
   };
 
-  const { error: insErr } = await supabaseAdmin.from("reservations").insert(insert);
-  if (insErr) return NextResponse.json({ ok: false, message: insErr.message }, { status: 500 });
+  const { data, error } = await s.from("reservations").insert(insertRow).select().single();
 
-  return NextResponse.json({ ok: true, status });
+  if (error) {
+    // 一意制約違反（既に同一お子さまで同日の予約がある）
+    if ((error as any).code === "23505") {
+      return NextResponse.json({ ok: false, message: "同じお子さまの同日予約が既に登録されています" }, { status: 409 });
+    }
+    return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ ok: true, id: data?.id, status });
 }
