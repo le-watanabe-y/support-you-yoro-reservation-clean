@@ -1,215 +1,152 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
 
 type Avail = {
   ok: boolean;
   date: string;
-  closed: boolean;
-  withinBookingWindow?: boolean;
-  canReserve?: boolean;
+  closed: boolean;                  // 休園（週末/祝日/年末年始）
+  withinBookingWindow: boolean;     // 正午ルール内
+  remaining: { daily: number; am: number; pm: number };
+  canReserve: boolean;
+  reason: "closed" | "window" | "full" | "period_full" | null;
 };
 
-type Holiday = {
-  ok: boolean;
-  holiday: boolean;
-  name?: string;
-};
+type HolidayRes = { ok: boolean; date: string; holiday: boolean; info: { name: string } | null };
 
-function nowJST(): Date {
-  // クライアント側でJST現在時刻
-  return new Date(
-    new Date().toLocaleString("en-US", { timeZone: "Asia/Tokyo" })
-  );
+function nowJST() {
+  return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
 }
-function ymd(d: Date): string {
+function ymd(d: Date) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${dd}`;
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
-function addDays(d: Date, n: number): Date {
+function addDays(d: Date, n: number) {
   const c = new Date(d);
   c.setDate(c.getDate() + n);
   return c;
 }
-function decideTargetDate(): string {
+// 00:00–11:59 は当日 / 12:00–24:00 は翌日
+function currentPreferredDate() {
   const n = nowJST();
   return n.getHours() < 12 ? ymd(n) : ymd(addDays(n, 1));
 }
 
-const badge = (label: string, tone: "red" | "green" | "blue" | "gray") => {
-  const toneMap: Record<string, string> = {
-    red: "#fee2e2",
-    green: "#dcfce7",
-    blue: "#e0f2fe",
-    gray: "#f3f4f6",
-  };
-  const borderMap: Record<string, string> = {
-    red: "#fecaca",
-    green: "#bbf7d0",
-    blue: "#bae6fd",
-    gray: "#e5e7eb",
-  };
-  const colorMap: Record<string, string> = {
-    red: "#b91c1c",
-    green: "#065f46",
-    blue: "#075985",
-    gray: "#374151",
-  };
-  return {
-    background: toneMap[tone],
-    border: `1px solid ${borderMap[tone]}`,
-    color: colorMap[tone],
-    fontWeight: 700,
-    padding: "4px 10px",
-    borderRadius: 9999,
-    fontSize: 12,
-  } as React.CSSProperties;
+const styles: Record<string, React.CSSProperties> = {
+  wrap: { maxWidth: 720, margin: "20px auto", padding: "0 14px" },
+  h1: { fontSize: 20, fontWeight: 800, marginBottom: 10 },
+  card: { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: 16 },
+  row: { display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" },
+  badge: { display: "inline-block", padding: "4px 10px", borderRadius: 999, fontSize: 12, fontWeight: 700 },
+  note: { fontSize: 12, color: "#475569", marginTop: 6, lineHeight: 1.7 },
+  grid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 } as const,
+  stat: { background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 12, textAlign: "center" },
+  statNum: { fontSize: 22, fontWeight: 800 },
+  btn: { height: 46, border: 0, borderRadius: 10, fontWeight: 700, fontSize: 16, background: "#00A5E2", color: "#fff", width: "100%" } as const,
+  link: { textDecoration: "underline", color: "#334155", marginLeft: 12 },
 };
 
 export default function CalendarPage() {
-  const sp = useSearchParams();
-  const override = sp.get("date") || sp.get("debug"); // デバッグ用
-  const [date, setDate] = useState<string>(override || decideTargetDate());
+  const date = useMemo(() => currentPreferredDate(), []);
   const [avail, setAvail] = useState<Avail | null>(null);
-  const [hol, setHol] = useState<Holiday | null>(null);
+  const [hol, setHol] = useState<HolidayRes | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // 正午ルールに従い、初回表示日を決定
   useEffect(() => {
-    if (!override) setDate(decideTargetDate());
-  }, [override]);
-
-  // API取得
-  useEffect(() => {
-    let alive = true;
-    async function load() {
+    let dead = false;
+    async function run() {
       setLoading(true);
       try {
-        const a = await fetch(`/api/availability?date=${date}`, { cache: "no-store" });
-        const aj = (await a.json()) as Avail;
-        const h = await fetch(`/api/debug/is-holiday?date=${date}`, { cache: "no-store" });
-        const hj = h.ok ? ((await h.json()) as Holiday) : { ok: true, holiday: false };
-
-        if (alive) {
-          setAvail(aj);
-          setHol(hj);
+        const [aRes, hRes] = await Promise.all([
+          fetch(`/api/availability?date=${encodeURIComponent(date)}`, { cache: "no-store" }),
+          fetch(`/api/debug/is-holiday?date=${encodeURIComponent(date)}`, { cache: "no-store" }),
+        ]);
+        const aJson = (await aRes.json()) as Avail;
+        const hJson = (await hRes.json()) as HolidayRes;
+        if (!dead) {
+          setAvail(aJson);
+          setHol(hJson?.ok ? hJson : { ok: true, date, holiday: false, info: null });
         }
       } catch {
-        if (alive) {
-          setAvail({ ok: false, date, closed: false });
-          setHol({ ok: false, holiday: false });
+        if (!dead) {
+          setAvail(null);
+          setHol({ ok: true, date, holiday: false, info: null });
         }
       } finally {
-        if (alive) setLoading(false);
+        if (!dead) setLoading(false);
       }
     }
-    load();
-    return () => {
-      alive = false;
-    };
+    run();
+    return () => { dead = true; };
   }, [date]);
 
-  const noonHint =
-    "前日12:00〜24:00は翌日分のみ、00:00〜12:00は当日分のみ表示（翌日予約は正午12:00から可能）。";
+  const badgeClosed = avail?.closed;
+  const badgeWindow = avail && !avail.closed && !avail.withinBookingWindow;
+  const badgeOpen = avail && avail.withinBookingWindow && !avail.closed;
 
-  const holidayName = hol?.holiday ? hol?.name || "祝日" : null;
-  const closed = !!avail?.closed;
-  const canReserve = !!avail?.canReserve;
+  const badgeHoliday = hol?.holiday;
+  const holidayName = hol?.info?.name || "祝日";
 
   return (
-    <main style={{ maxWidth: 720, margin: "24px auto", padding: 16 }}>
-      <h1 style={{ fontSize: 20, fontWeight: 800, marginBottom: 12 }}>
-        予約カレンダー
-      </h1>
+    <main style={styles.wrap}>
+      <h1 style={styles.h1}>カレンダー</h1>
 
-      <section
-        style={{
-          border: "1px solid #e5e7eb",
-          borderRadius: 12,
-          padding: 16,
-          background: "#fff",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            gap: 8,
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: 8,
-          }}
-        >
-          <div style={{ fontWeight: 800, fontSize: 18 }}>{date}</div>
+      <div style={styles.card}>
+        <div style={styles.row}>
+          <div style={{ fontSize: 16, fontWeight: 800 }}>{date}</div>
 
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {/* 祝日バッジ */}
-            {holidayName && <span style={badge(`祝日：${holidayName}`, "blue")} />}
-            {/* 休園/開園バッジ */}
-            {closed ? (
-              <span style={badge("休園日", "red")} />
-            ) : (
-              <span style={badge("開園日", "green")} />
-            )}
-          </div>
-        </div>
+          {badgeHoliday && (
+            <span style={{ ...styles.badge, background: "#FEF3C7", color: "#92400E" }}>
+              祝日：{holidayName}
+            </span>
+          )}
 
-        <p style={{ color: "#4b5563", fontSize: 13 }}>{noonHint}</p>
+          {badgeClosed && (
+            <span style={{ ...styles.badge, background: "#FEE2E2", color: "#991B1B" }}>休園</span>
+          )}
 
-        <div style={{ marginTop: 16 }}>
-          {loading && <p>読込中…</p>}
-          {!loading && (
-            <>
-              {closed ? (
-                <p style={{ color: "#b91c1c", fontWeight: 700 }}>
-                  本日は休園日のため予約できません。
-                </p>
-              ) : canReserve ? (
-                <p style={{ color: "#065f46", fontWeight: 700 }}>予約可能です。</p>
-              ) : (
-                <p style={{ color: "#92400e", fontWeight: 700 }}>
-                  現在は受付時間外です（正午ルール）。
-                </p>
-              )}
-            </>
+          {badgeWindow && (
+            <span style={{ ...styles.badge, background: "#E5E7EB", color: "#374151" }}>受付時間外</span>
+          )}
+
+          {badgeOpen && !badgeClosed && (
+            <span style={{ ...styles.badge, background: "#DCFCE7", color: "#065F46" }}>
+              受付中
+            </span>
           )}
         </div>
 
-        <div style={{ marginTop: 16, display: "flex", gap: 8 }}>
-          <a
-            href="/reserve"
-            style={{
-              height: 44,
-              background: "#00A5E2",
-              color: "#fff",
-              border: 0,
-              borderRadius: 10,
-              fontWeight: 700,
-              padding: "0 16px",
-              display: "inline-flex",
-              alignItems: "center",
-            }}
-          >
-            予約フォームへ
-          </a>
-          <a
-            href={`/api/availability?date=${date}`}
-            style={{ alignSelf: "center", textDecoration: "underline", fontSize: 13 }}
-          >
-            API（可否を確認）
-          </a>
+        <div style={styles.note}>
+          前日昼12:00〜24:00は<strong>翌日</strong>のみ、深夜0:00〜昼12:00は<strong>当日</strong>のみ表示・受付します。<br />
+          <strong>翌日予約は正午12:00から可能です。</strong>
         </div>
-      </section>
 
-      {/* デバッグメモ（必要なければ削除可） */}
-      <details style={{ marginTop: 16 }}>
-        <summary style={{ cursor: "pointer" }}>デバッグ情報</summary>
-        <pre style={{ fontSize: 12, background: "#f9fafb", padding: 12, overflow: "auto" }}>
-{JSON.stringify({ avail, hol }, null, 2)}
-        </pre>
-      </details>
+        {!loading && avail && (
+          <>
+            <div style={styles.grid}>
+              <div style={styles.stat}>
+                <div>本日の残り枠</div>
+                <div style={styles.statNum}>{avail.remaining.daily}</div>
+              </div>
+              <div style={styles.stat}>
+                <div>午前 / 午後</div>
+                <div style={styles.statNum}>{avail.remaining.am} / {avail.remaining.pm}</div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", marginTop: 14 }}>
+              <a href="/reserve" style={{ ...styles.btn, textAlign: "center", width: 220 }}>
+                予約フォームへ
+              </a>
+              <a href="/admin" style={styles.link}>管理画面</a>
+            </div>
+          </>
+        )}
+
+        {loading && <div style={{ marginTop: 12, color: "#64748B" }}>読み込み中…</div>}
+      </div>
     </main>
   );
 }
