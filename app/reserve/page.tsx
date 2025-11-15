@@ -1,322 +1,259 @@
-// app/reserve/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
 
-function nowJST() {
+// ---- 時刻プルダウン（自由に調整OK） ------------------------------
+// 08:00〜18:00 を 30分刻みで生成します。変更したい場合は start/end/step を変えてください。
+function generateTimes(start = "08:00", end = "18:00", stepMin = 30): string[] {
+  const toMin = (hhmm: string) => {
+    const [h, m] = hhmm.split(":").map(Number);
+    return h * 60 + m;
+  };
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const toHHMM = (m: number) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
+  const out: string[] = [];
+  for (let m = toMin(start); m <= toMin(end); m += stepMin) out.push(toHHMM(m));
+  return out;
+}
+const TIME_OPTIONS = generateTimes("08:00", "18:00", 30);
+
+// ---- JSTユーティリティ -------------------------------------------
+function nowJST(): Date {
   return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
 }
-function ymd(d: Date) {
+function ymd(d: Date): string {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
+}
+function addDays(d: Date, n: number) {
+  const c = new Date(d);
+  c.setDate(c.getDate() + n);
+  return c;
 }
 
-type AvailResp = {
-  ok: boolean;
-  date: string;
-  time?: string;
-  closed: boolean;
-  withinBookingWindow: boolean;
-  canReserve: boolean;
-  available?: Record<string, number>;
-  message?: string;
-};
+// 正午ルール：00:00–11:59 は当日、12:00–24:00 は翌日
+function currentPreferredDate(): string {
+  const n = nowJST();
+  return n.getHours() < 12 ? ymd(n) : ymd(addDays(n, 1));
+}
 
 export default function ReservePage() {
-  // 表示対象日（当日 or 翌日）を JST の 12:00 で切り替え
-  const now = nowJST();
-  const hour = now.getHours();
-  const targetDate = useMemo(() => {
-    const base = new Date(now);
-    if (hour >= 12) base.setDate(base.getDate() + 1);
-    return ymd(base);
-  }, [hour]);
-
+  // 日付は変更不可（サーバ側でも正午ルールで検証）
+  const preferredDate = useMemo(() => currentPreferredDate(), []);
   const [guardianName, setGuardianName] = useState("");
   const [email, setEmail] = useState("");
   const [childName, setChildName] = useState("");
-  const [childBirthdate, setChildBirthdate] = useState(""); // YYYY-MM-DD
-  const [time, setTime] = useState(""); // HH:MM
-  const [checking, setChecking] = useState(false);
-  const [canReserve, setCanReserve] = useState<boolean | null>(null);
-  const [checkMsg, setCheckMsg] = useState<string>("");
+  const [childBirthdate, setChildBirthdate] = useState("");
+  const [dropoffTime, setDropoffTime] = useState(TIME_OPTIONS[0]);
+  const [submitting, setSubmitting] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
 
-  // 時刻が選ばれたら空き状況をチェック
+  // 画面読み込み時に、現在時刻に近い選択肢があれば初期値にする（任意）
   useEffect(() => {
-    let abort = false;
-    async function run() {
-      if (!time) {
-        setCanReserve(null);
-        setCheckMsg("");
-        return;
-      }
-      setChecking(true);
-      setCheckMsg("空き状況を確認中…");
-      try {
-        const r = await fetch(
-          `/api/availability?date=${encodeURIComponent(targetDate)}&time=${encodeURIComponent(time)}`,
-          { cache: "no-store" }
-        );
-        const json: AvailResp = await r.json();
-        if (abort) return;
-        if (!json.ok) {
-          setCanReserve(false);
-          setCheckMsg(json.message ?? "予約不可");
-        } else {
-          setCanReserve(json.canReserve);
-          setCheckMsg(
-            json.canReserve
-              ? "予約可能です"
-              : json.closed
-              ? "休園日/年末年始のため予約できません"
-              : !json.withinBookingWindow
-              ? "受付時間外のため予約できません"
-              : "定員に達しています"
-          );
-        }
-      } catch (e) {
-        if (!abort) {
-          setCanReserve(false);
-          setCheckMsg("確認に失敗しました");
-        }
-      } finally {
-        if (!abort) setChecking(false);
-      }
-    }
-    run();
-    return () => {
-      abort = true;
-    };
-  }, [targetDate, time]);
+    const n = nowJST();
+    const hh = String(n.getHours()).padStart(2, "0");
+    const mm = n.getMinutes() < 30 ? "00" : "30";
+    const close = `${hh}:${mm}`;
+    const found = TIME_OPTIONS.find((t) => t >= close);
+    if (found) setDropoffTime(found);
+  }, []);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-
-    // 軽いクライアント側バリデーション
-    if (!guardianName || !email || !childName || !childBirthdate || !time) {
-      alert("必須項目が未入力です。");
-      return;
-    }
-
-    // 念のため送信直前にも可否チェック（レース条件対策）
-    try {
-      const pre = await fetch(
-        `/api/availability?date=${encodeURIComponent(targetDate)}&time=${encodeURIComponent(time)}`,
-        { cache: "no-store" }
-      );
-      const j: AvailResp = await pre.json();
-      if (!j.ok || !j.canReserve) {
-        alert(
-          j.message ??
-            (j.closed
-              ? "休園日/年末年始のため予約できません。"
-              : !j.withinBookingWindow
-              ? "受付時間外のため予約できません。"
-              : "現在この時間帯は予約できません。")
-        );
-        return;
-      }
-    } catch {
-      // 失敗してもサーバ側で最終判定されるが、体験のため止める
-      alert("空き状況の確認に失敗しました。時間をおいて再度お試しください。");
-      return;
-    }
+    setSubmitting(true);
+    setMessage(null);
 
     const payload = {
-      guardian_name: guardianName,
+      guardianName,
       email,
-      child_name: childName,
-      child_birthdate: childBirthdate,
-      preferred_date: targetDate,
-      dropoff_time: time,
+      childName,
+      childBirthdate: childBirthdate || null,
+      preferredDate,
+      dropoffTime, // ← プルダウンで選択した "HH:MM"
     };
 
-    const res = await fetch("/api/reservations", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      cache: "no-store",
-      body: JSON.stringify(payload),
-    });
-    const json = await res.json();
+    try {
+      const res = await fetch("/api/reservations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify(payload),
+      });
 
-    if (!res.ok || !json.ok) {
-      alert(json.message ?? "送信に失敗しました。");
-      return;
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setMessage(json?.message || "送信に失敗しました");
+      } else {
+        setMessage(
+          json?.status === "approved"
+            ? "受付完了：承認済み（先着枠）"
+            : "受付完了：待機（承認までお待ちください）"
+        );
+        // 任意：フォーム初期化
+        setGuardianName("");
+        setEmail("");
+        setChildName("");
+        setChildBirthdate("");
+      }
+    } catch (err: any) {
+      setMessage(err?.message || "送信エラーが発生しました");
+    } finally {
+      setSubmitting(false);
     }
-
-    // 承認 or 保留の結果を表示
-    if (json.status === "approved") {
-      alert("受付完了（承認済）です。当日のご来室をお待ちしております。");
-    } else {
-      alert("受付完了（保留）です。先着超過のため承認までお待ちください。");
-    }
-
-    // 初期化
-    setGuardianName("");
-    setEmail("");
-    setChildName("");
-    setChildBirthdate("");
-    setTime("");
-    setCanReserve(null);
-    setCheckMsg("");
   }
 
-  // スマホ前提のシンプル freee 風 UI
+  // 表示用の案内（正午ルール）
+  const noonHint =
+    "前日12:00〜24:00は翌日分のみ、00:00〜12:00は当日分のみ受付です（翌日予約は正午12:00から可能）。";
+
   return (
-    <main style={{ margin: "0 auto", padding: 16, maxWidth: 560 }}>
-      <h1 style={{ fontSize: 20, fontWeight: 700, margin: "12px 0 8px" }}>病児保育 予約フォーム</h1>
-      <p style={{ marginBottom: 12, lineHeight: 1.7 }}>
-        {hour < 12 ? (
-          <>
-            現在は <strong>00:00〜12:00（当日のみ受付）</strong> です。
-          </>
-        ) : (
-          <>
-            現在は <strong>12:00〜24:00（翌日のみ受付）</strong> です。
-          </>
-        )}
-        <br />
-        <span style={{ color: "#6b7280" }}>
-          ※ 翌日予約は<strong>正午12:00</strong>から可能です。
-        </span>
-      </p>
+    <main style={styles.wrap}>
+      <h1 style={styles.h1}>病児保育 予約</h1>
 
-      <form onSubmit={onSubmit} style={{ display: "grid", gap: 12 }}>
-        <div style={box}>
-          <div style={label}>利用日</div>
-          <div style={{ fontWeight: 700 }}>{targetDate}</div>
-          <div style={{ color: "#6b7280", fontSize: 12, marginTop: 4 }}>
-            受付ルールにより当日または翌日のみ選択可能です
-          </div>
+      <div style={styles.notice}>
+        <div>
+          <strong>対象日：</strong>
+          <span style={{ fontWeight: 700 }}>{preferredDate}</span>
         </div>
+        <div style={{ fontSize: 13, color: "#4b5563", marginTop: 4 }}>{noonHint}</div>
+      </div>
 
-        <div style={box}>
-          <label style={label}>
-            預け希望時刻 <span style={req}>必須</span>
-          </label>
+      <form onSubmit={onSubmit} style={styles.form}>
+        <label style={styles.label}>
+          保護者氏名（必須）
           <input
-            style={input}
-            type="time"
-            value={time}
-            onChange={(e) => setTime(e.target.value)}
-            required
-          />
-          {time ? (
-            <div style={{ fontSize: 12, marginTop: 6 }}>
-              {checking ? "確認中…" : checkMsg}
-              {canReserve === true && (
-                <span style={{ marginLeft: 8, color: "#059669" }}>◯ 予約可能</span>
-              )}
-              {canReserve === false && (
-                <span style={{ marginLeft: 8, color: "#b91c1c" }}>× 予約不可</span>
-              )}
-            </div>
-          ) : null}
-        </div>
-
-        <div style={box}>
-          <label style={label}>
-            保護者氏名 <span style={req}>必須</span>
-          </label>
-          <input
-            style={input}
-            type="text"
+            style={styles.input}
             value={guardianName}
             onChange={(e) => setGuardianName(e.target.value)}
             required
-            placeholder="山田 花子"
+            placeholder="山田 太郎"
+            inputMode="text"
           />
-        </div>
+        </label>
 
-        <div style={box}>
-          <label style={label}>
-            連絡用メールアドレス <span style={req}>必須</span>
-          </label>
+        <label style={styles.label}>
+          メールアドレス（必須）
           <input
-            style={input}
-            type="email"
+            style={styles.input}
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
-            placeholder="hanako@example.com"
+            placeholder="example@example.com"
             inputMode="email"
+            type="email"
           />
-        </div>
+        </label>
 
-        <div style={box}>
-          <label style={label}>
-            お子さま氏名 <span style={req}>必須</span>
+        <div style={{ display: "grid", gap: 12, gridTemplateColumns: "1fr", width: "100%" }}>
+          <label style={styles.label}>
+            お子さま氏名
+            <input
+              style={styles.input}
+              value={childName}
+              onChange={(e) => setChildName(e.target.value)}
+              placeholder="山田 花子"
+              inputMode="text"
+            />
           </label>
-          <input
-            style={input}
-            type="text"
-            value={childName}
-            onChange={(e) => setChildName(e.target.value)}
-            required
-            placeholder="山田 太郎"
-          />
-        </div>
 
-        <div style={box}>
-          <label style={label}>
-            お子さま生年月日 <span style={req}>必須</span>
+          <label style={styles.label}>
+            お子さま生年月日
+            <input
+              style={styles.input}
+              value={childBirthdate}
+              onChange={(e) => setChildBirthdate(e.target.value)}
+              type="date"
+              placeholder="YYYY-MM-DD"
+            />
           </label>
-          <input
-            style={input}
-            type="date"
-            value={childBirthdate}
-            onChange={(e) => setChildBirthdate(e.target.value)}
-            required
-            inputMode="numeric"
-          />
         </div>
 
-        <button style={button} type="submit" disabled={!time || checking}>
-          予約を送信する
+        <label style={styles.label}>
+          預け希望時刻（必須 / プルダウン）
+          <select
+            style={styles.select}
+            value={dropoffTime}
+            onChange={(e) => setDropoffTime(e.target.value)}
+            required
+          >
+            {TIME_OPTIONS.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <button type="submit" disabled={submitting} style={styles.submit}>
+          {submitting ? "送信中…" : "予約を送信"}
         </button>
+
+        {message && <p style={styles.message}>{message}</p>}
       </form>
     </main>
   );
 }
 
-const box: React.CSSProperties = {
-  border: "1px solid #e5e7eb",
-  borderRadius: 10,
-  padding: 12,
-  background: "#fff",
-};
-
-const label: React.CSSProperties = {
-  fontSize: 13,
-  color: "#374151",
-  marginBottom: 6,
-  display: "block",
-  fontWeight: 600,
-};
-
-const input: React.CSSProperties = {
-  width: "100%",
-  height: 40,
-  border: "1px solid #d1d5db",
-  borderRadius: 8,
-  padding: "0 12px",
-  fontSize: 16,
-};
-
-const button: React.CSSProperties = {
-  height: 44,
-  background: "#2f7adf", // freee っぽいブルー
-  color: "#fff",
-  border: "none",
-  borderRadius: 10,
-  fontSize: 16,
-  fontWeight: 700,
-};
-
-const req: React.CSSProperties = {
-  color: "#dc2626",
-  marginLeft: 6,
-  fontSize: 12,
+// ---- 最低限のスタイル（スマホ優先・freee風の丸角） ------------------
+const styles: Record<string, React.CSSProperties> = {
+  wrap: {
+    maxWidth: 560,
+    margin: "24px auto",
+    padding: "16px",
+  },
+  h1: {
+    fontSize: 20,
+    fontWeight: 800,
+    marginBottom: 12,
+  },
+  notice: {
+    background: "#F0F9FF",
+    border: "1px solid #BAE6FD",
+    borderRadius: 12,
+    padding: "12px 14px",
+    marginBottom: 16,
+  },
+  form: {
+    display: "grid",
+    gap: 14,
+  },
+  label: {
+    display: "grid",
+    gap: 6,
+    fontSize: 14,
+    fontWeight: 600,
+  },
+  input: {
+    height: 44,
+    padding: "0 12px",
+    fontSize: 16,
+    border: "1px solid #e5e7eb",
+    borderRadius: 10,
+    outline: "none",
+  },
+  select: {
+    height: 44,
+    padding: "0 12px",
+    fontSize: 16,
+    border: "1px solid #e5e7eb",
+    borderRadius: 10,
+    outline: "none",
+    background: "#fff",
+  },
+  submit: {
+    height: 48,
+    background: "#00A5E2",
+    color: "#fff",
+    border: 0,
+    borderRadius: 12,
+    fontWeight: 700,
+    fontSize: 16,
+  },
+  message: {
+    marginTop: 8,
+    color: "#0F766E",
+    fontWeight: 700,
+  },
 };
