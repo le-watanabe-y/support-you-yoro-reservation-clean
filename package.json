@@ -1,6 +1,4 @@
 {
-  "name": "support-you-yoro-reservation-clean",
-  "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -11,14 +9,15 @@
     "date-holidays": "3.23.2",
     "next": "14.2.3",
     "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react-dom": "18.3.1",
+    "resend": "3.3.0"
   },
   "devDependencies": {
-    "eslint": "8.57.0",
-    "eslint-config-next": "14.2.3",
     "typescript": "5.6.3",
     "@types/node": "20.11.30",
     "@types/react": "18.3.5",
-    "@types/react-dom": "18.3.1"
+    "@types/react-dom": "18.3.0",
+    "eslint": "8.57.0",
+    "eslint-config-next": "14.2.3"
   }
 }
