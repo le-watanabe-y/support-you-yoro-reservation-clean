@@ -1,202 +1,233 @@
 "use client";
-import React, { useEffect, useMemo, useState } from "react";
 
-/** /api/availability の戻り型（必要な部分だけ） */
-type AvailResp = {
-  ok?: boolean;
-  date?: string;
-  closed?: boolean;
-  withinBookingWindow?: boolean;
-  canReserve?: boolean;
-  limits?: { daily?: number | null; slot?: number | null } | null;
-  counts?: { daily?: number | null; slot?: number | null } | null;
-  message?: string;
+import { useEffect, useMemo, useState } from "react";
+
+/** JST の現在日時を Date で返す（UTC ベースで+09:00補正） */
+function nowJST(): Date {
+  const now = new Date();
+  // Date -> UTC -> JST(+9h)
+  const utc = now.getTime() + now.getTimezoneOffset() * 60_000;
+  return new Date(utc + 9 * 60 * 60 * 1000);
+}
+function addDays(d: Date, days: number): Date {
+  const nd = new Date(d);
+  nd.setDate(nd.getDate() + days);
+  return nd;
+}
+function ymd(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const da = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${da}`;
+}
+type Avail = {
+  date: string;
+  closed: boolean;                 // 休園日 or 定休日
+  withinBookingWindow: boolean;    // 受付ウィンドウ内か（時間帯ルール）
+  canReserve: boolean;             // 予約可（定員・締切・休園 すべて含めて判定）
 };
 
-const HOUR = 60 * 60 * 1000;
-const JST_OFFSET = 9 * HOUR;
+export default function CalendarPage() {
+  const jstNow = nowJST();
+  const hour = jstNow.getHours();
 
-/** UTC Date -> JST視点（getUTC*でJSTの値が取れる） */
-function toJst(d: Date) {
-  return new Date(d.getTime() + JST_OFFSET);
-}
-function ymdJst(d: Date) {
-  const j = toJst(d);
-  const y = j.getUTCFullYear();
-  const m = String(j.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(j.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-/** 「JSTの y-m-d hh:mm」を表すUTC Date */
-function jstAt(ymd: string, hh = 0, mm = 0) {
-  const [y, m, d] = ymd.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, d, hh - 9, mm, 0));
-}
-/** D-1 12:00 ～ D 12:00（JST）での受付状態（前/開/後） */
-function windowStatus(ymd: string, now = new Date()) {
-  const end = jstAt(ymd, 12, 0);            // D 12:00（排他）
-  const start = new Date(end.getTime());
-  start.setUTCDate(start.getUTCDate() - 1); // D-1 12:00
-  const t = now.getTime();
-  if (t < start.getTime()) return "before"; // 受付前
-  if (t >= end.getTime()) return "after";   // 受付終了
-  return "open";                             // 受付中
-}
+  // 仕様：
+  // - 00:00〜11:59 は「当日」を表示
+  // - 12:00〜23:59 は「翌日」を表示（前日正午〜当日0時は翌日予約のみ）
+  const targetDate = useMemo(() => {
+    const target = hour < 12 ? jstNow : addDays(jstNow, 1);
+    return ymd(target);
+  }, [hour, jstNow]);
+  const targetLabel = hour < 12 ? "本日の受付状況" : "翌日の受付状況";
 
-export default function Calendar() {
-  const [ymd, setYmd] = useState<string>("");
-  const [label, setLabel] = useState<"きょう" | "あす">("きょう");
-  const [data, setData] = useState<AvailResp | null>(null);
   const [loading, setLoading] = useState(true);
-
-  // ルール：
-  // ・前日 12:00〜24:00（JST） → 翌日だけ表示
-  // ・当日 00:00〜12:00（JST） → 当日だけ表示
-  const ruleNote = "※ 翌日予約は正午12:00から可能です。";
+  const [data, setData] = useState<Avail | null>(null);
+  const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    const now = new Date();
-    const j = toJst(now);
-    const hour = j.getUTCHours(); // JST の時（0-23）
-    const today = ymdJst(now);
-    const tomorrow = ymdJst(new Date(now.getTime() + 24 * HOUR));
-
-    if (hour < 12) {
-      setYmd(today);
-      setLabel("きょう");
-    } else {
-      setYmd(tomorrow);
-      setLabel("あす");
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!ymd) return;
-    setLoading(true);
-    fetch(`/api/availability?date=${ymd}`, { cache: "no-store" })
-      .then((r) => r.json())
-      .then((json) => setData(json))
-      .catch(() => setData(null))
-      .finally(() => setLoading(false));
-  }, [ymd]);
-
-  const card: React.CSSProperties = useMemo(
-    () => ({
-      border: "1px solid #e5e7eb",
-      background: "#fff",
-      borderRadius: 12,
-      padding: 16,
-    }),
-    []
-  );
-
-  function StatusBadge() {
-    if (!ymd) return null;
-    const ws = windowStatus(ymd);
-    let text = "";
-    let color = "#6b7280";
-
-    if (data?.closed) {
-      text = "休園日";
-      color = "#991b1b";
-    } else if (ws === "before") {
-      text = "受付前（前日12:00から）";
-    } else if (ws === "after") {
-      text = "受付終了（当日12:00まで）";
-    } else {
-      // open
-      if (data?.ok) {
-        const limit = data?.limits?.daily ?? null;
-        const used = data?.counts?.daily ?? null;
-        if (limit != null && used != null) {
-          const rest = Math.max(0, Number(limit) - Number(used));
-          if (rest > 0) {
-            text = `受付中（残り ${rest} 名）`;
-            color = "#065f46";
-          } else {
-            text = "満員";
-            color = "#92400e";
-          }
-        } else {
-          text = data?.canReserve ? "受付中" : "受付不可";
-          color = data?.canReserve ? "#065f46" : "#92400e";
-        }
-      } else {
-        text = "状態を取得できませんでした";
-        color = "#92400e";
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setErr(null);
+      try {
+        const res = await fetch(`/api/availability?date=${targetDate}`, { cache: "no-store" });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json?.message || "failed");
+        if (!cancelled) setData(json as Avail);
+      } catch (e: any) {
+        if (!cancelled) setErr(e?.message ?? "読み込みに失敗しました");
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-    }
-    return (
-      <span style={{ marginLeft: "auto", fontSize: 12, color }}>{text}</span>
-    );
-  }
+    })();
+    return () => { cancelled = true; };
+  }, [targetDate]);
 
   return (
-    <main
-      style={{
-        padding: 16,
-        maxWidth: 720,
-        margin: "0 auto",
-        fontFamily:
-          "system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial, 'Noto Sans JP', sans-serif",
-      }}
-    >
-      <h1 style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>
-        予約カレンダー（{label} のみ表示）
-      </h1>
-      <p style={{ color: "#6b7280", marginBottom: 4 }}>
-        受付ウィンドウ：<strong>ご利用日前日12:00〜当日12:00（JST）</strong>
+    <main style={styles.container}>
+      <h1 style={styles.title}>予約カレンダー</h1>
+
+      {/* 案内（常時表示） */}
+      <p style={styles.notice}>
+        <strong>翌日予約は正午12:00から可能です。</strong>
+        <br />
+        <span style={{ opacity: 0.8 }}>
+          00:00〜11:59 は当日分、12:00〜24:00 は翌日分のみ表示されます（JST）。
+        </span>
       </p>
-      <p style={{ color: "#6b7280", marginBottom: 12 }}>{ruleNote}</p>
 
-      {loading || !ymd ? (
-        <div>読み込み中…</div>
-      ) : (
-        <div style={card}>
-          <div
-            style={{
-              display: "flex",
-              gap: 8,
-              alignItems: "center",
-              marginBottom: 8,
-            }}
-          >
-            <strong style={{ fontSize: 16 }}>{label}</strong>
-            <span style={{ fontSize: 12, color: "#6b7280" }}>{ymd}</span>
-            <StatusBadge />
-          </div>
-
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <a
-              href="/"
-              style={{
-                padding: "10px 14px",
-                borderRadius: 8,
-                background: "#111827",
-                color: "#fff",
-                textDecoration: "none",
-                fontWeight: 600,
-              }}
-            >
-              この日で申込（フォームへ）
-            </a>
-            <a
-              href={`/api/availability?date=${encodeURIComponent(ymd)}`}
-              target="_blank"
-              rel="noreferrer"
-              style={{
-                padding: "10px 14px",
-                borderRadius: 8,
-                border: "1px solid #e5e7eb",
-                textDecoration: "none",
-                color: "#111827",
-              }}
-            >
-              詳細JSONを見る
-            </a>
-          </div>
+      <section style={styles.card}>
+        <div style={styles.cardHead}>
+          <div style={styles.badge}>{targetLabel}</div>
+          <div style={styles.dateText}>{targetDate}</div>
         </div>
-      )}
+
+        {loading && <p style={styles.muted}>読み込み中…</p>}
+        {err && <p style={{ ...styles.muted, color: "#c00" }}>エラー：{err}</p>}
+
+        {!loading && !err && data && (
+          <>
+            {data.closed ? (
+              <div style={styles.row}>
+                <span style={styles.tagGray}>休園日</span>
+                <span style={styles.rowText}>本日は休園日のため予約できません。</span>
+              </div>
+            ) : (
+              <>
+                <div style={styles.row}>
+                  <span style={data.withinBookingWindow ? styles.tagBlue : styles.tagGray}>
+                    受付ウィンドウ
+                  </span>
+                  <span style={styles.rowText}>
+                    {data.withinBookingWindow ? "受付時間内です" : "いまは受付時間外です"}
+                  </span>
+                </div>
+
+                <div style={styles.row}>
+                  <span style={data.canReserve ? styles.tagGreen : styles.tagRed}>
+                    {data.canReserve ? "予約可" : "予約不可"}
+                  </span>
+                  <span style={styles.rowText}>
+                    {data.canReserve
+                      ? "フォームからお申し込みいただけます。"
+                      : "定員/締切/休園等の条件により、現在はお申し込みできません。"}
+                  </span>
+                </div>
+              </>
+            )}
+
+            <div style={{ marginTop: 16, fontSize: 12, color: "#667085" }}>
+              ※ 受付ルールと定員はお知らせなく変更される場合があります。最新の状態は送信時に再判定されます。
+            </div>
+          </>
+        )}
+      </section>
+
+      <nav style={styles.links}>
+        <a href="/" style={styles.linkBtn}>フォームへ戻る</a>
+        <a href="/admin" style={styles.linkBtn}>管理ページ</a>
+      </nav>
     </main>
   );
 }
+
+const styles: Record<string, React.CSSProperties> = {
+  container: {
+    padding: "16px",
+    fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Noto Sans JP, sans-serif",
+    maxWidth: 720,
+    margin: "0 auto",
+  },
+  title: { fontSize: 20, fontWeight: 700, margin: "4px 0 12px" },
+  notice: {
+    background: "#F2F4F7",
+    border: "1px solid #EAECF0",
+    borderRadius: 8,
+    padding: "12px 14px",
+    marginBottom: 12,
+    lineHeight: 1.6,
+    fontSize: 14,
+  },
+  card: {
+    border: "1px solid #EAECF0",
+    borderRadius: 12,
+    padding: 16,
+    background: "#fff",
+  },
+  cardHead: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 12,
+  },
+  badge: {
+    display: "inline-block",
+    padding: "4px 8px",
+    borderRadius: 999,
+    background: "#EEF4FF",
+    color: "#1D4ED8",
+    fontSize: 12,
+    fontWeight: 700,
+  },
+  dateText: { marginLeft: "auto", fontSize: 14, color: "#667085" },
+  row: { display: "flex", alignItems: "center", gap: 8, marginTop: 8 },
+  rowText: { fontSize: 14, color: "#101828" },
+  tagBlue: {
+    display: "inline-block",
+    padding: "3px 8px",
+    borderRadius: 6,
+    background: "#E0EAFF",
+    color: "#1D4ED8",
+    fontSize: 12,
+    fontWeight: 700,
+    minWidth: 88,
+    textAlign: "center",
+  },
+  tagGreen: {
+    display: "inline-block",
+    padding: "3px 8px",
+    borderRadius: 6,
+    background: "#D1FADF",
+    color: "#027A48",
+    fontSize: 12,
+    fontWeight: 700,
+    minWidth: 88,
+    textAlign: "center",
+  },
+  tagRed: {
+    display: "inline-block",
+    padding: "3px 8px",
+    borderRadius: 6,
+    background: "#FFE4E6",
+    color: "#B91C1C",
+    fontSize: 12,
+    fontWeight: 700,
+    minWidth: 88,
+    textAlign: "center",
+  },
+  tagGray: {
+    display: "inline-block",
+    padding: "3px 8px",
+    borderRadius: 6,
+    background: "#F2F4F7",
+    color: "#667085",
+    fontSize: 12,
+    fontWeight: 700,
+    minWidth: 88,
+    textAlign: "center",
+  },
+  muted: { color: "#667085", fontSize: 14 },
+  links: {
+    display: "flex",
+    gap: 8,
+    marginTop: 16,
+  },
+  linkBtn: {
+    border: "1px solid #EAECF0",
+    padding: "8px 12px",
+    borderRadius: 8,
+    textDecoration: "none",
+    color: "#111827",
+    background: "#fff",
+  },
+};
