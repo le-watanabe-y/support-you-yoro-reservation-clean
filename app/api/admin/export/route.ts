@@ -1,27 +1,15 @@
 // app/api/admin/export/route.ts
-// Node.js ランタイムで動かします（Buffer を使うため）
 export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabaseAdmin"; // ← “関数” ではなく “クライアント” を import
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-// ----- Basic 認証（Vercel 環境変数: ADMIN_USER / ADMIN_PASS） -----
 function basicAuthOK(req: NextRequest): boolean {
   const h = req.headers.get("authorization") ?? "";
   if (!h.startsWith("Basic ")) return false;
-  const decoded = Buffer.from(h.slice(6), "base64").toString("utf8"); // "user:pass"
-  const idx = decoded.indexOf(":");
-  if (idx < 0) return false;
-  const user = decoded.slice(0, idx);
-  const pass = decoded.slice(idx + 1);
-  return (
-    user === process.env.ADMIN_USER &&
-    pass === process.env.ADMIN_PASS &&
-    !!user &&
-    !!pass
-  );
+  const [user, pass] = Buffer.from(h.slice(6), "base64").toString("utf8").split(":");
+  return user === process.env.ADMIN_USER && pass === process.env.ADMIN_PASS;
 }
-
 function unauthorized() {
   return new NextResponse("Unauthorized", {
     status: 401,
@@ -29,52 +17,39 @@ function unauthorized() {
   });
 }
 
-// CSV 1セルのエスケープ
-function csvCell(v: unknown): string {
-  if (v === null || v === undefined) return '""';
-  const s = String(v).replace(/"/g, '""');
-  return `"${s}"`;
-}
-
 export async function GET(req: NextRequest) {
   if (!basicAuthOK(req)) return unauthorized();
 
-  const s = supabaseAdmin; // ← 呼び出さない（supabaseAdmin() はダメ）
+  const s = supabaseAdmin;
   const { data, error } = await s
     .from("reservations")
-    .select(
-      "id,created_at,guardian_name,email,preferred_date,dropoff_time,time_slot,child_name,child_birthdate,status"
-    )
+    .select("*")
     .order("created_at", { ascending: false });
 
-  if (error) {
-    return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
-  }
+  if (error) return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
 
   const headers = [
-    "id",
-    "created_at",
-    "guardian_name",
-    "email",
-    "preferred_date",
-    "dropoff_time",
-    "time_slot",
-    "child_name",
-    "child_birthdate",
-    "status",
+    "id","guardian_name","email","preferred_date","dropoff_time",
+    "time_slot","status","child_name","child_birthdate","created_at"
   ];
-
-  const rows = (data ?? []).map((r: any) =>
-    headers.map((k) => csvCell(r[k])).join(",")
-  );
-  const csv = [headers.join(","), ...rows].join("\n");
+  const esc = (v: any) =>
+    `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const csv =
+    [headers.join(",")]
+      .concat(
+        (data ?? []).map(r =>
+          [
+            r.id, r.guardian_name, r.email, r.preferred_date, r.dropoff_time,
+            r.time_slot, r.status, r.child_name, r.child_birthdate, r.created_at
+          ].map(esc).join(",")
+        )
+      )
+      .join("\n");
 
   return new NextResponse(csv, {
-    status: 200,
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": `attachment; filename="reservations.csv"`,
-      "Cache-Control": "no-store",
+      "Content-Disposition": 'attachment; filename="reservations.csv"',
     },
   });
 }
