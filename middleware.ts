@@ -1,42 +1,35 @@
 // middleware.ts
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+
+export function middleware(req: NextRequest) {
+  const { pathname } = req.nextUrl;
+
+  // 対象パス
+  const needAuth =
+    pathname.startsWith("/admin") || pathname.startsWith("/api/admin");
+
+  if (!needAuth) return NextResponse.next();
+
+  const auth = req.headers.get("authorization") || "";
+  if (!auth.startsWith("Basic ")) {
+    return new NextResponse("Authentication required", {
+      status: 401,
+      headers: { "WWW-Authenticate": 'Basic realm="admin"' },
+    });
+  }
+
+  const raw = auth.split(" ")[1];
+  const [user, pass] = Buffer.from(raw, "base64").toString("utf8").split(":");
+  const U = process.env.ADMIN_USER ?? "";
+  const P = process.env.ADMIN_PASS ?? "";
+  if (!U || user !== U || pass !== P) {
+    return new NextResponse("Unauthorized", { status: 401 });
+  }
+
+  return NextResponse.next();
+}
 
 export const config = {
   matcher: ["/admin/:path*", "/api/admin/:path*"],
 };
-
-export function middleware(req: NextRequest) {
-  const USER = process.env.ADMIN_USER;
-  const PASS = process.env.ADMIN_PASS;
-  if (!USER || !PASS) return NextResponse.next(); // 未設定なら通す（開発用）
-
-  const auth = req.headers.get("authorization");
-  if (!auth?.startsWith("Basic ")) {
-    return new NextResponse("Auth required", {
-      status: 401,
-      headers: { "WWW-Authenticate": 'Basic realm="admin"' },
-    });
-  }
-
-  const b64 = auth.split(" ")[1] ?? "";
-  let u = "", p = "";
-  try {
-    const decoded = atob(b64);
-    const i = decoded.indexOf(":");
-    u = decoded.slice(0, i);
-    p = decoded.slice(i + 1);
-  } catch {
-    // 失敗時は 401
-    return new NextResponse("Unauthorized", {
-      status: 401,
-      headers: { "WWW-Authenticate": 'Basic realm="admin"' },
-    });
-  }
-
-  if (u === USER && p === PASS) return NextResponse.next();
-
-  return new NextResponse("Unauthorized", {
-    status: 401,
-    headers: { "WWW-Authenticate": 'Basic realm="admin"' },
-  });
-}
