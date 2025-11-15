@@ -2,17 +2,13 @@
 export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabaseAdmin"; // ← 関数ではなく“クライアント”
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-// Basic 認証（Vercel環境変数 ADMIN_USER / ADMIN_PASS）
+// Basic 認証（Vercel 環境変数 ADMIN_USER / ADMIN_PASS）
 function basicAuthOK(req: NextRequest): boolean {
   const h = req.headers.get("authorization") ?? "";
   if (!h.startsWith("Basic ")) return false;
-  const decoded = Buffer.from(h.slice(6), "base64").toString("utf8"); // "user:pass"
-  const i = decoded.indexOf(":");
-  if (i < 0) return false;
-  const user = decoded.slice(0, i);
-  const pass = decoded.slice(i + 1);
+  const [user, pass] = Buffer.from(h.slice(6), "base64").toString("utf8").split(":");
   return user === process.env.ADMIN_USER && pass === process.env.ADMIN_PASS;
 }
 function unauthorized() {
@@ -46,7 +42,8 @@ export async function PATCH(
     );
   }
 
-  const s = supabaseAdmin; // ← ここは “supabaseAdmin()” と呼ばない
+  // ← supabaseAdmin は「関数ではない」ので“呼ばない”
+  const s = supabaseAdmin;
   const { data, error } = await s
     .from("reservations")
     .update({ status })
