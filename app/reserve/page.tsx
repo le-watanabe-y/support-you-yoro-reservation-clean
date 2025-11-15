@@ -1,9 +1,9 @@
+// app/reserve/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
 
-// ---- 時刻プルダウン（自由に調整OK） ------------------------------
-// 08:00〜18:00 を 30分刻みで生成します。変更したい場合は start/end/step を変えてください。
+// ---- 時刻プルダウン（必要に応じて範囲/刻みを変更） ----
 function generateTimes(start = "08:00", end = "18:00", stepMin = 30): string[] {
   const toMin = (hhmm: string) => {
     const [h, m] = hhmm.split(":").map(Number);
@@ -17,7 +17,7 @@ function generateTimes(start = "08:00", end = "18:00", stepMin = 30): string[] {
 }
 const TIME_OPTIONS = generateTimes("08:00", "18:00", 30);
 
-// ---- JSTユーティリティ -------------------------------------------
+// ---- JSTユーティリティ ----
 function nowJST(): Date {
   return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
 }
@@ -32,25 +32,40 @@ function addDays(d: Date, n: number) {
   c.setDate(c.getDate() + n);
   return c;
 }
-
 // 正午ルール：00:00–11:59 は当日、12:00–24:00 は翌日
 function currentPreferredDate(): string {
   const n = nowJST();
   return n.getHours() < 12 ? ymd(n) : ymd(addDays(n, 1));
 }
 
+// ---- 型 ----
+type AvailJSON = {
+  ok: boolean;
+  date: string;
+  time?: string | null;
+  period?: "am" | "pm" | null;
+  closed: boolean;
+  withinBookingWindow: boolean;
+  canReserve: boolean;
+  daily: { used: number; limit: number; remaining: number };
+  period: null | { key: "am" | "pm"; used: number; limit: number; remaining: number };
+  message?: string;
+};
+
 export default function ReservePage() {
-  // 日付は変更不可（サーバ側でも正午ルールで検証）
   const preferredDate = useMemo(() => currentPreferredDate(), []);
   const [guardianName, setGuardianName] = useState("");
   const [email, setEmail] = useState("");
   const [childName, setChildName] = useState("");
   const [childBirthdate, setChildBirthdate] = useState("");
   const [dropoffTime, setDropoffTime] = useState(TIME_OPTIONS[0]);
-  const [submitting, setSubmitting] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
 
-  // 画面読み込み時に、現在時刻に近い選択肢があれば初期値にする（任意）
+  const [checking, setChecking] = useState(false);
+  const [availability, setAvailability] = useState<AvailJSON | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  // 初期値：現在時刻に近い値を候補に（任意）
   useEffect(() => {
     const n = nowJST();
     const hh = String(n.getHours()).padStart(2, "0");
@@ -60,10 +75,72 @@ export default function ReservePage() {
     if (found) setDropoffTime(found);
   }, []);
 
+  // 選択した時刻で空き状況を確認
+  useEffect(() => {
+    let abort = false;
+    async function run() {
+      if (!dropoffTime) {
+        setAvailability(null);
+        return;
+      }
+      setChecking(true);
+      setMessage(null);
+      try {
+        const r = await fetch(
+          `/api/availability?date=${encodeURIComponent(preferredDate)}&time=${encodeURIComponent(dropoffTime)}`,
+          { cache: "no-store" }
+        );
+        const json: AvailJSON = await r.json();
+        if (abort) return;
+        if (!json.ok) {
+          setAvailability(null);
+          setMessage(json.message ?? "空き状況の取得に失敗しました");
+        } else {
+          setAvailability(json);
+        }
+      } catch (e: any) {
+        if (!abort) {
+          setAvailability(null);
+          setMessage("空き状況の取得に失敗しました");
+        }
+      } finally {
+        if (!abort) setChecking(false);
+      }
+    }
+    run();
+    return () => {
+      abort = true;
+    };
+  }, [preferredDate, dropoffTime]);
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setSubmitting(true);
     setMessage(null);
+
+    // 直前チェック（UIとAPIのタイムラグ対策）
+    try {
+      const res = await fetch(
+        `/api/availability?date=${encodeURIComponent(preferredDate)}&time=${encodeURIComponent(dropoffTime)}`,
+        { cache: "no-store" }
+      );
+      const j: AvailJSON = await res.json();
+      if (!j.ok || !j.canReserve) {
+        setSubmitting(false);
+        const reason =
+          j?.closed
+            ? "休園日のため予約できません。"
+            : !j?.withinBookingWindow
+            ? "受付時間外のため予約できません。"
+            : "現在この時間帯は満席です。";
+        alert(reason);
+        return;
+      }
+    } catch {
+      setSubmitting(false);
+      alert("空き状況の確認に失敗しました。時間をおいて再度お試しください。");
+      return;
+    }
 
     const payload = {
       guardianName,
@@ -71,7 +148,7 @@ export default function ReservePage() {
       childName,
       childBirthdate: childBirthdate || null,
       preferredDate,
-      dropoffTime, // ← プルダウンで選択した "HH:MM"
+      dropoffTime,
     };
 
     try {
@@ -81,9 +158,8 @@ export default function ReservePage() {
         cache: "no-store",
         body: JSON.stringify(payload),
       });
-
       const json = await res.json().catch(() => ({}));
-      if (!res.ok) {
+      if (!res.ok || !json?.ok) {
         setMessage(json?.message || "送信に失敗しました");
       } else {
         setMessage(
@@ -91,7 +167,7 @@ export default function ReservePage() {
             ? "受付完了：承認済み（先着枠）"
             : "受付完了：待機（承認までお待ちください）"
         );
-        // 任意：フォーム初期化
+        // 初期化
         setGuardianName("");
         setEmail("");
         setChildName("");
@@ -104,9 +180,23 @@ export default function ReservePage() {
     }
   }
 
-  // 表示用の案内（正午ルール）
   const noonHint =
     "前日12:00〜24:00は翌日分のみ、00:00〜12:00は当日分のみ受付です（翌日予約は正午12:00から可能）。";
+
+  // 表示用：空きメッセージ
+  const availText = useMemo(() => {
+    const a = availability;
+    if (!a) return "";
+    if (checking) return "空き状況を確認中…";
+    if (a.closed) return "休園日のため予約不可";
+    if (!a.withinBookingWindow) return "受付時間外のため予約不可";
+    const daily = `本日残り ${a.daily.remaining}/${a.daily.limit}`;
+    const slot =
+      a.period && a.period.remaining != null
+        ? ` / この時間帯 残り ${a.period.remaining}/${a.period.limit}`
+        : "";
+    return `${a.canReserve ? "予約可能" : "満席"}：${daily}${slot}`;
+  }, [availability, checking]);
 
   return (
     <main style={styles.wrap}>
@@ -129,7 +219,6 @@ export default function ReservePage() {
             onChange={(e) => setGuardianName(e.target.value)}
             required
             placeholder="山田 太郎"
-            inputMode="text"
           />
         </label>
 
@@ -146,29 +235,26 @@ export default function ReservePage() {
           />
         </label>
 
-        <div style={{ display: "grid", gap: 12, gridTemplateColumns: "1fr", width: "100%" }}>
-          <label style={styles.label}>
-            お子さま氏名
-            <input
-              style={styles.input}
-              value={childName}
-              onChange={(e) => setChildName(e.target.value)}
-              placeholder="山田 花子"
-              inputMode="text"
-            />
-          </label>
+        <label style={styles.label}>
+          お子さま氏名
+          <input
+            style={styles.input}
+            value={childName}
+            onChange={(e) => setChildName(e.target.value)}
+            placeholder="山田 花子"
+          />
+        </label>
 
-          <label style={styles.label}>
-            お子さま生年月日
-            <input
-              style={styles.input}
-              value={childBirthdate}
-              onChange={(e) => setChildBirthdate(e.target.value)}
-              type="date"
-              placeholder="YYYY-MM-DD"
-            />
-          </label>
-        </div>
+        <label style={styles.label}>
+          お子さま生年月日
+          <input
+            style={styles.input}
+            value={childBirthdate}
+            onChange={(e) => setChildBirthdate(e.target.value)}
+            type="date"
+            placeholder="YYYY-MM-DD"
+          />
+        </label>
 
         <label style={styles.label}>
           預け希望時刻（必須 / プルダウン）
@@ -184,9 +270,15 @@ export default function ReservePage() {
               </option>
             ))}
           </select>
+          {/* 空き状況 */}
+          {dropoffTime && (
+            <div style={{ fontSize: 12, marginTop: 6, color: availability?.canReserve ? "#065f46" : "#b91c1c" }}>
+              {availText}
+            </div>
+          )}
         </label>
 
-        <button type="submit" disabled={submitting} style={styles.submit}>
+        <button type="submit" disabled={submitting || checking} style={styles.submit}>
           {submitting ? "送信中…" : "予約を送信"}
         </button>
 
@@ -196,7 +288,6 @@ export default function ReservePage() {
   );
 }
 
-// ---- 最低限のスタイル（スマホ優先・freee風の丸角） ------------------
 const styles: Record<string, React.CSSProperties> = {
   wrap: {
     maxWidth: 560,
