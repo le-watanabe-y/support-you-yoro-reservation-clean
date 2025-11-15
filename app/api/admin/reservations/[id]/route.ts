@@ -1,56 +1,35 @@
-// app/api/admin/reservations/[id]/route.ts
-export const runtime = "nodejs";
-
+// app/api/admin/reservations/[id]/route.ts（全置き換え）
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { okAuth } from "@/lib/config";
 
-// Basic 認証（Vercel 環境変数 ADMIN_USER / ADMIN_PASS）
-function basicAuthOK(req: NextRequest): boolean {
-  const h = req.headers.get("authorization") ?? "";
-  if (!h.startsWith("Basic ")) return false;
-  const [user, pass] = Buffer.from(h.slice(6), "base64").toString("utf8").split(":");
-  return user === process.env.ADMIN_USER && pass === process.env.ADMIN_PASS;
-}
-function unauthorized() {
-  return new NextResponse("Unauthorized", {
-    status: 401,
-    headers: { "WWW-Authenticate": 'Basic realm="admin"' },
-  });
-}
-
-const ALLOWED = ["approved", "rejected"] as const;
+const ALLOWED = ["pending", "approved", "rejected", "canceled"] as const;
 type Status = (typeof ALLOWED)[number];
 
 export async function PATCH(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  ctx: { params: { id: string } }
 ) {
-  if (!basicAuthOK(req)) return unauthorized();
-
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ ok: false, message: "Invalid JSON" }, { status: 400 });
+  if (!okAuth(req)) {
+    return NextResponse.json({ ok: false, message: "unauthorized" }, { status: 401 });
   }
 
-  const status = body?.status as Status;
-  if (!ALLOWED.includes(status)) {
-    return NextResponse.json(
-      { ok: false, message: 'status must be "approved" or "rejected"' },
-      { status: 400 }
-    );
+  const id = ctx.params?.id;
+  const body = await req.json().catch(() => ({}));
+  const status: Status | undefined = body?.status;
+
+  if (!id || !status || !ALLOWED.includes(status)) {
+    return NextResponse.json({ ok: false, message: "bad request" }, { status: 400 });
   }
 
-  // ← supabaseAdmin は「関数ではない」ので“呼ばない”
-  const s = supabaseAdmin;
-  const { data, error } = await s
+  const { error } = await supabaseAdmin
     .from("reservations")
     .update({ status })
-    .eq("id", params.id)
-    .select("*")
-    .single();
+    .eq("id", id);
 
-  if (error) return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
-  return NextResponse.json({ ok: true, item: data });
+  if (error) {
+    return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ ok: true });
 }
