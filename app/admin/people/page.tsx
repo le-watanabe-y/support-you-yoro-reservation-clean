@@ -80,7 +80,7 @@ export default function PeoplePage() {
   }, [rows, q, start, end]);
 
   // 保護者（email+name）で集計
-  const people: Person[] = useMemo(() => {
+  const people = useMemo(() => {
     const map = new Map<string, Person>();
     for (const r of filtered) {
       const emailKey = (r.email ?? "").toLowerCase();
