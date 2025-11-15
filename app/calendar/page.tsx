@@ -26,11 +26,12 @@ function ymdJst(d: Date) {
 }
 function jstAt(ymd: string, hh = 0, mm = 0) {
   const [y, m, d] = ymd.split("-").map(Number);
-  // 「JSTの y-m-d hh:mm」を表す UTC Date を作る（Nextサーバと整合）
+  // 「JST の y-m-d hh:mm」を表す UTC Date を生成
   return new Date(Date.UTC(y, m - 1, d, hh - 9, mm, 0));
 }
 function windowStatus(ymd: string, now = new Date()) {
-  const end = jstAt(ymd, 12, 0); // D 12:00（排他的）
+  // 受付ウィンドウ: D-1 12:00 ～ D 12:00（JST）
+  const end = jstAt(ymd, 12, 0); // D 12:00（排他）
   const start = new Date(end.getTime());
   start.setUTCDate(start.getUTCDate() - 1); // D-1 12:00
   const t = now.getTime();
@@ -40,33 +41,42 @@ function windowStatus(ymd: string, now = new Date()) {
 }
 
 export default function Calendar() {
-  const [today, setToday] = useState("");
-  const [tomorrow, setTomorrow] = useState("");
-  const [data, setData] = useState<Record<string, AvailResp | null>>({});
+  const [targetDate, setTargetDate] = useState<string>("");
+  const [label, setLabel] = useState<"きょう" | "あす">("きょう");
+  const [info, setInfo] = useState<string>("");
+  const [avail, setAvail] = useState<AvailResp | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const now = new Date();
-    const t = ymdJst(now);
-    const tm = ymdJst(new Date(now.getTime() + 24 * HOUR));
-    setToday(t);
-    setTomorrow(tm);
+    // JST の現在時刻で分岐
+    const now = toJst(new Date());
+    const hour = now.getUTCHours(); // JST に直した上での時間（0-23）
+    const today = ymdJst(new Date());
+    const tomorrow = ymdJst(new Date(Date.now() + 24 * HOUR));
 
-    Promise.all(
-      [t, tm].map(async (d) => {
-        const res = await fetch(`/api/availability?date=${d}`, { cache: "no-store" });
-        const json = (await res.json()) as AvailResp;
-        return [d, json] as const;
-      })
-    )
-      .then((entries) => {
-        const obj: Record<string, AvailResp> = {};
-        for (const [d, j] of entries) obj[d] = j;
-        setData(obj);
-      })
-      .catch(() => setData({}))
-      .finally(() => setLoading(false));
+    // ルール：
+    // ・前日 12:00〜24:00 は翌日表示（hour >= 12）
+    // ・当日 00:00〜12:00 は当日表示（hour < 12）
+    if (hour >= 12) {
+      setTargetDate(tomorrow);
+      setLabel("あす");
+      setInfo("翌日予約は正午12:00から可能です。（現在、翌日分を表示中）");
+    } else {
+      setTargetDate(today);
+      setLabel("きょう");
+      setInfo("翌日予約は正午12:00から可能です。（現在、当日分のみ表示中）");
+    }
   }, []);
+
+  useEffect(() => {
+    if (!targetDate) return;
+    setLoading(true);
+    fetch(`/api/availability?date=${targetDate}`, { cache: "no-store" })
+      .then((r) => r.json())
+      .then((j: AvailResp) => setAvail(j))
+      .catch(() => setAvail(null))
+      .finally(() => setLoading(false));
+  }, [targetDate]);
 
   const card: React.CSSProperties = {
     border: "1px solid #e5e7eb",
@@ -75,13 +85,15 @@ export default function Calendar() {
     padding: 16,
   };
 
-  function Row({ label, ymd }: { label: string; ymd: string }) {
-    const a = data[ymd];
+  function StatusLine({ ymd }: { ymd: string }) {
     const ws = windowStatus(ymd);
     let text = "";
     let color = "#6b7280";
 
-    if (a?.closed) {
+    if (!avail?.ok) {
+      text = "状態を取得できませんでした";
+      color = "#92400e";
+    } else if (avail.closed) {
       text = "休園日";
       color = "#991b1b";
     } else if (ws === "before") {
@@ -90,65 +102,25 @@ export default function Calendar() {
       text = "受付終了（当日12:00まで）";
     } else {
       // open
-      if (a?.ok) {
-        const limit = a?.limits?.daily ?? null;
-        const used = a?.counts?.daily ?? null;
-        if (limit != null && used != null) {
-          const rest = Math.max(0, Number(limit) - Number(used));
-          if (rest > 0) {
-            text = `受付中（残り ${rest} 名）`;
-            color = "#065f46";
-          } else {
-            text = "満員";
-            color = "#92400e";
-          }
+      const limit = avail?.limits?.daily ?? null;
+      const used = avail?.counts?.daily ?? null;
+      if (limit != null && used != null) {
+        const rest = Math.max(0, Number(limit) - Number(used));
+        if (rest > 0 && avail?.canReserve) {
+          text = `受付中（残り ${rest} 名）`;
+          color = "#065f46";
         } else {
-          text = a?.canReserve ? "受付中" : "受付不可";
-          color = a?.canReserve ? "#065f46" : "#92400e";
+          text = "満員";
+          color = "#92400e";
         }
       } else {
-        text = "状態を取得できませんでした";
-        color = "#92400e";
+        // 予備
+        text = avail?.canReserve ? "受付中" : "受付不可";
+        color = avail?.canReserve ? "#065f46" : "#92400e";
       }
     }
-
     return (
-      <div style={card}>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
-          <strong style={{ fontSize: 16 }}>{label}</strong>
-          <span style={{ fontSize: 12, color: "#6b7280" }}>{ymd}</span>
-          <span style={{ marginLeft: "auto", fontSize: 12, color }}>{text}</span>
-        </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <a
-            href="/"
-            style={{
-              padding: "10px 14px",
-              borderRadius: 8,
-              background: "#111827",
-              color: "#fff",
-              textDecoration: "none",
-              fontWeight: 600,
-            }}
-          >
-            この日で申込（フォームへ）
-          </a>
-          <a
-            href={`/api/availability?date=${encodeURIComponent(ymd)}`}
-            target="_blank"
-            rel="noreferrer"
-            style={{
-              padding: "10px 14px",
-              borderRadius: 8,
-              border: "1px solid #e5e7eb",
-              textDecoration: "none",
-              color: "#111827",
-            }}
-          >
-            詳細JSONを見る
-          </a>
-        </div>
-      </div>
+      <span style={{ marginLeft: "auto", fontSize: 12, color }}>{text}</span>
     );
   }
 
@@ -162,18 +134,66 @@ export default function Calendar() {
       }}
     >
       <h1 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>
-        予約カレンダー（きょう・あす）
+        予約カレンダー（対象日 1 件）
       </h1>
-      <p style={{ color: "#6b7280", marginBottom: 12 }}>
-        受付ウィンドウ：<strong>ご利用日前日12:00〜当日12:00（JST）</strong>
-      </p>
 
-      {loading ? (
+      {/* 案内メッセージ（常時） */}
+      <div
+        style={{
+          border: "1px solid #e5e7eb",
+          background: "#f9fafb",
+          color: "#374151",
+          borderRadius: 12,
+          padding: 12,
+          fontSize: 13,
+          marginBottom: 12,
+        }}
+      >
+        <div style={{ fontWeight: 600, marginBottom: 4 }}>
+          翌日予約は正午12:00から可能です。
+        </div>
+        <div style={{ color: "#6b7280" }}>{info}</div>
+      </div>
+
+      {loading || !targetDate ? (
         <div>読み込み中…</div>
       ) : (
-        <div style={{ display: "grid", gap: 12 }}>
-          {today && <Row label="きょう" ymd={today} />}
-          {tomorrow && <Row label="あす" ymd={tomorrow} />}
+        <div style={card}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+            <strong style={{ fontSize: 16 }}>{label}</strong>
+            <span style={{ fontSize: 12, color: "#6b7280" }}>{targetDate}</span>
+            <StatusLine ymd={targetDate} />
+          </div>
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <a
+              href="/"
+              style={{
+                padding: "10px 14px",
+                borderRadius: 8,
+                background: "#111827",
+                color: "#fff",
+                textDecoration: "none",
+                fontWeight: 600,
+              }}
+            >
+              この日で申込（フォームへ）
+            </a>
+            <a
+              href={`/api/availability?date=${encodeURIComponent(targetDate)}`}
+              target="_blank"
+              rel="noreferrer"
+              style={{
+                padding: "10px 14px",
+                borderRadius: 8,
+                border: "1px solid #e5e7eb",
+                textDecoration: "none",
+                color: "#111827",
+              }}
+            >
+              詳細JSONを見る
+            </a>
+          </div>
         </div>
       )}
     </main>
