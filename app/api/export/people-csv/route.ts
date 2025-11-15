@@ -14,11 +14,10 @@ type Row = {
   child_birthdate?: string | null;
 };
 
-// Excel対策
 function safeCell(v: any) {
   if (v === null || v === undefined) return "";
   let s = String(v).replace(/\r?\n/g, " ").trim();
-  if (/^[=+\-@]/.test(s)) s = "'" + s;
+  if (/^[=+\-@]/.test(s)) s = "'" + s; // Excel数式対策
   return s;
 }
 function escCSV(v: any) {
@@ -65,7 +64,7 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // group by (email|guardian_name)
+  // email+guardian_name 単位で集計
   type PersonAgg = {
     guardian_name: string;
     email: string;
