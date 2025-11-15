@@ -1,98 +1,70 @@
 // lib/reservationRules.ts
-// 祝日判定の実装ファイル名に合わせて import 名を合わせてください
-import { isJapanHoliday } from "@/lib/jpHolidays";
+export type Status = "pending" | "approved" | "rejected" | "canceled";
+export type Period = "am" | "pm";
 
-/** 定員カウント対象ステータス */
-export const COUNT_STATUSES = ["pending", "approved"] as const;
+export const LIMIT_DAILY = 6 as const;
+export const LIMIT_BY_PERIOD: Record<Period, number> = { am: 6, pm: 6 };
+export const COUNT_STATUSES: Status[] = ["pending", "approved"];
 
-/** 上限（設定） */
-export const LIMIT_DAILY = 6 as const; // 1日の総上限
-export const LIMIT_BY_PERIOD = { am: 6, pm: 6 } as const; // 午前/午後の上限
-
-/** 互換用エクスポート（旧コードが参照することがある） */
-export const LIMITS = {
-  daily: LIMIT_DAILY,
-  am: LIMIT_BY_PERIOD.am,
-  pm: LIMIT_BY_PERIOD.pm,
-} as const;
-
-export type Period = keyof typeof LIMIT_BY_PERIOD; // 'am' | 'pm'
-
-function nowInJST(): Date {
+function toDateJST(dateStr: string) {
+  // YYYY-MM-DD を JST で midnight に
+  return new Date(`${dateStr}T00:00:00+09:00`);
+}
+function nowJST() {
   return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
 }
-
-/** YYYY-MM-DD（JST） */
-export function ymd(d: Date): string {
+function ymd(d: Date) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
-
-/** 'YYYY-MM-DD' → JSTの00:00 */
-export function parseYmd(s: string): Date {
-  return new Date(`${s}T00:00:00+09:00`);
+function addDays(d: Date, n: number) {
+  const c = new Date(d);
+  c.setDate(c.getDate() + n);
+  return c;
 }
 
-/** 'HH:mm' → 'am' | 'pm' */
-export function slotFromTimeStr(time?: string | null): Period {
-  if (!time) return "am";
-  const [h] = time.split(":").map(Number);
-  return Number.isFinite(h) && h >= 12 ? "pm" : "am";
+export function toPeriodFromTime(hhmm: string): Period {
+  const h = parseInt(hhmm.split(":")[0] || "0", 10);
+  return h < 12 ? "am" : "pm";
 }
 
-/** 新名称（旧slotFromTimeStr互換） */
-export function toPeriodFromTime(time?: string | null): Period {
-  return slotFromTimeStr(time);
+function isWeekend(dateStr: string) {
+  const w = toDateJST(dateStr).getDay(); // 0=Sun,6=Sat
+  return w === 0 || w === 6;
+}
+function isYearEndBreak(dateStr: string) {
+  const d = toDateJST(dateStr);
+  const m = d.getMonth() + 1;
+  const day = d.getDate();
+  return (m === 12 && day >= 29) || (m === 1 && day <= 4);
 }
 
-/** 休園判定：土日祝・年末年始（12/29〜1/4） */
-export function isClosedDate(dateStr: string): boolean {
-  const dow = new Date(`${dateStr}T09:00:00+09:00`).getUTCDay(); // 0=日,6=土
-  const weekend = dow === 0 || dow === 6;
-
-  const [, mStr, dStr] = dateStr.split("-");
-  const m = Number(mStr), d = Number(dStr);
-  const yearend = (m === 12 && d >= 29) || (m === 1 && d <= 4);
-
-  const holiday = (() => {
-    try { return !!isJapanHoliday?.(dateStr); } catch { return false; }
-  })();
-
-  return weekend || holiday || yearend;
+// 2025年の主な祝日（簡易・固定）※運用で翌年は更新してください
+const HOLIDAYS_2025 = new Set([
+  "2025-01-01","2025-01-13","2025-02-11","2025-02-23","2025-02-24",
+  "2025-03-20","2025-04-29","2025-05-03","2025-05-04","2025-05-05","2025-05-06",
+  "2025-07-21","2025-08-11","2025-09-15","2025-09-23","2025-10-13","2025-11-03",
+  "2025-11-23","2025-11-24",
+]);
+function isJapaneseHoliday(dateStr: string) {
+  return HOLIDAYS_2025.has(dateStr);
 }
 
-/** 受付ウィンドウ：
- *  - 00:00〜11:59 JST → 当日のみ受付
- *  - 12:00〜23:59 JST → 翌日のみ受付
- */
-export function withinBookingWindow(dateStr: string): boolean {
-  const now = nowInJST();
+export function isClosedDate(dateStr: string) {
+  return isWeekend(dateStr) || isJapaneseHoliday(dateStr) || isYearEndBreak(dateStr);
+}
+
+export function withinBookingWindow(targetDate: string) {
+  const now = nowJST();
   const today = ymd(now);
-
-  const t = new Date(now);
-  t.setDate(now.getDate() + 1);
-  const tomorrow = ymd(t);
-
-  const hour = now.getHours();
-  if (dateStr === today) return hour < 12;
-  if (dateStr === tomorrow) return hour >= 12;
-  return false;
+  const tomorrow = ymd(addDays(now, 1));
+  if (now.getHours() < 12) return targetDate === today;     // 0:00-11:59 → 当日のみ
+  return targetDate === tomorrow;                            // 12:00-24:00 → 翌日のみ
 }
 
-/** 受付最終可否（休園日でなく、かつ受付ウィンドウ内） */
-export function canAcceptForDate(dateStr: string): boolean {
-  return withinBookingWindow(dateStr) && !isClosedDate(dateStr);
-}
-
-/** 上限を返す：period 指定で AM/PM、未指定で日上限 */
-export function limitFor(period?: Period): number {
-  return period ? LIMIT_BY_PERIOD[period] : LIMIT_DAILY;
-}
-
-/** 自動承認：1日先着2名まで approved */
-export const AUTO_APPROVE_HEADCOUNT = 2 as const;
-export function shouldAutoApprove(currentApprovedCountOfDay: number): boolean {
-  return currentApprovedCountOfDay < AUTO_APPROVE_HEADCOUNT;
+export function currentPreferredDate() {
+  const now = nowJST();
+  return ymd(now.getHours() < 12 ? now : addDays(now, 1));
 }
