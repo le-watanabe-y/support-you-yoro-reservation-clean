@@ -1,3 +1,6 @@
+// app/api/availability/route.ts
+export const runtime = "nodejs";
+
 import { NextRequest, NextResponse } from "next/server";
 import {
   isClosedDate,
@@ -6,31 +9,29 @@ import {
 } from "@/lib/reservationRules";
 
 export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const date = (searchParams.get("date") || "").trim();
-  const time = (searchParams.get("time") || "").trim();
+  const url = new URL(req.url);
+  const date = url.searchParams.get("date"); // YYYY-MM-DD（必須）
+  const time = url.searchParams.get("time"); // HH:mm（任意）
 
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+  if (!date) {
     return NextResponse.json(
-      { ok: false, message: "date must be YYYY-MM-DD" },
+      { ok: false, message: 'query "date=YYYY-MM-DD" is required' },
       { status: 400 }
     );
   }
+
   const closed = isClosedDate(date);
   const within = withinBookingWindow(date);
-
-  let timeSlot: "am" | "pm" | null = null;
-  if (/^([01]?\d|2[0-3]):([0-5]\d)$/.test(time)) {
-    timeSlot = toPeriodFromTime(time);
-  }
+  const period = toPeriodFromTime(time);
+  const canReserve = !closed && within;
 
   return NextResponse.json({
     ok: true,
     date,
-    time: time || null,
-    timeSlot,
-    closed,
-    withinBookingWindow: within,
-    canReserve: within && !closed,
+    time,
+    period,                      // 'am' | 'pm'（内部参照用）
+    closed,                      // 休園日/土日祝/年末年始
+    withinBookingWindow: within, // ウィンドウ内か
+    canReserve,                  // 最終的な受付可否
   });
 }
