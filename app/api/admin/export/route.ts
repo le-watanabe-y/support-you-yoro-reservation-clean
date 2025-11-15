@@ -3,18 +3,38 @@ export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import { okAuth } from "@/lib/adminAuth";
 
-function basicOk(req: NextRequest): boolean {
-  const auth = req.headers.get("authorization") || "";
-  if (!auth.startsWith("Basic ")) return false;
-  const [user, pass] = Buffer.from(auth.slice(6), "base64").toString().split(":");
-  return user === process.env.ADMIN_USER && pass === process.env.ADMIN_PASS;
+function csvEscape(v: any): string {
+  const s = v == null ? "" : String(v);
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
 }
 
 export async function GET(req: NextRequest) {
-  if (!basicOk(req)) return NextResponse.json({ ok: false, message: "unauthorized" }, { status: 401 });
+  if (!okAuth(req)) {
+    return NextResponse.json({ ok: false, message: "unauthorized" }, { status: 401, headers: { "WWW-Authenticate": 'Basic realm="admin"' } });
+  }
 
-  const { data, error } = await supabaseAdmin.from("reservations").select("*").order("preferred_date", { ascending: true });
+  const s = supabaseAdmin;
+  const { data, error } = await s
+    .from("reservations")
+    .select("id, preferred_date, dropoff_time, time_slot, guardian_name, email, child_name, child_birthdate, status, created_at")
+    .order("created_at", { ascending: false });
+
   if (error) return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
-  return NextResponse.json({ ok: true, items: data ?? [] });
+
+  const header = ["id","preferred_date","dropoff_time","time_slot","guardian_name","email","child_name","child_birthdate","status","created_at"];
+  const lines = [header.join(",")];
+  for (const r of data ?? []) {
+    lines.push(header.map((h) => csvEscape((r as any)[h])).join(","));
+  }
+  const csv = lines.join("\n");
+  return new NextResponse(csv, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/csv; charset=UTF-8",
+      "Content-Disposition": 'attachment; filename="reservations.csv"',
+    },
+  });
 }
