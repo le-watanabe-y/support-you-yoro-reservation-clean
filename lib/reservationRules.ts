@@ -1,70 +1,82 @@
 // lib/reservationRules.ts
-// 予約の基本ルール・ユーティリティ（JST基準）
-// - 受付ウィンドウ: 「利用日Dの前日12:00(JST) ～ 当日12:00(JST)」
-// - 休園日: 土日・日本の祝日・年末年始(12/29～1/4)
-// - time_slot: 00:00-11:59 -> "am", 12:00-23:59 -> "pm"
+// 祝日判定（既存の実装名に合わせて必要なら変更）
+import { isJapanHoliday } from "@/lib/jpHolidays"; // 例: "@/lib/holidayJP" 等にしているなら合わせてください
 
-import { isJapanHoliday } from "@/lib/jpHolidays";
-
-export const LIMITS = {
-  daily: 6,
-  am: 6,
-  pm: 6,
-} as const;
-
-export type TimeSlot = "am" | "pm";
+/** 上限・定員カウント対象 */
+export const LIMIT_DAILY = 6 as const;
+export const LIMIT_BY_PERIOD = { am: 6, pm: 6 } as const;
+export type Period = keyof typeof LIMIT_BY_PERIOD; // 'am' | 'pm'
 export const COUNT_STATUSES = ["pending", "approved"] as const;
 
-const HOUR = 60 * 60 * 1000;
-
-// 日付文字列 YYYY-MM-DD を UTC の 00:00 に解釈
-export function parseYmd(ymd: string): Date {
-  const [y, m, d] = ymd.split("-").map(Number);
-  return new Date(Date.UTC(y, (m ?? 1) - 1, d ?? 1, 0, 0, 0));
+/** JST の「今」 */
+function nowInJST(): Date {
+  const s = new Date().toLocaleString("en-US", { timeZone: "Asia/Tokyo" });
+  return new Date(s);
 }
 
-// Date -> YYYY-MM-DD（UTCフィールドで安定化）
+/** YYYY-MM-DD */
 export function ymd(d: Date): string {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
 
-// 受付可能ウィンドウ判定（前日12:00(JST,=UTC+9) ～ 当日12:00(JST)）
-export function withinBookingWindow(date: string | Date, now: Date = new Date()): boolean {
-  const d = typeof date === "string" ? parseYmd(date) : new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
-  // JSTの12:00はUTCの03:00
-  const openUTC = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - 1, 3)); // D-1 12:00(JST)
-  const closeUTC = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 3));   // D 12:00(JST)
-  return now >= openUTC && now < closeUTC;
+/** 'YYYY-MM-DD' を JST の 00:00 として解釈 */
+export function parseYmd(s: string): Date {
+  return new Date(`${s}T00:00:00+09:00`);
 }
 
-// 休園日（週末・祝日・年末年始）の判定
-export function isClosedDate(date: string | Date): boolean {
-  const ds = typeof date === "string" ? date : ymd(date);
-  const [y, m, d] = ds.split("-").map(Number);
-  // JSTの日付として扱うために 09:00 UTC を基準に曜日を取る（その日の内部に確実に入る）
-  const dow = new Date(Date.UTC(y, (m ?? 1) - 1, d ?? 1, 9)).getUTCDay(); // 0:Sun,6:Sat
+/** 'HH:mm' → 'am' | 'pm' */
+export function slotFromTimeStr(time?: string | null): Period {
+  if (!time) return "am";
+  const [h] = time.split(":").map(Number);
+  return Number.isFinite(h) && h >= 12 ? "pm" : "am";
+}
+
+/** 互換用（既存ルートが参照している名前） */
+export function toPeriodFromTime(time?: string | null): Period {
+  return slotFromTimeStr(time);
+}
+
+/** 休園日：土日祝・年末年始（12/29〜1/4） */
+export function isClosedDate(dateStr: string): boolean {
+  // JST の真昼 09:00 を使うと曜日ずれが起きにくい
+  const dow = new Date(`${dateStr}T09:00:00+09:00`).getUTCDay(); // 0=日,6=土
   const weekend = dow === 0 || dow === 6;
-  const yearEnd = (m === 12 && d! >= 29) || (m === 1 && d! <= 4);
-  const holiday = isJapanHoliday(new Date(Date.UTC(y, (m ?? 1) - 1, d ?? 1, 9)));
-  return weekend || holiday || yearEnd;
+
+  const [, mStr, dStr] = dateStr.split("-");
+  const m = Number(mStr), d = Number(dStr);
+  const yearend = (m === 12 && d >= 29) || (m === 1 && d <= 4);
+
+  const holiday = (() => {
+    try { return !!isJapanHoliday?.(dateStr); } catch { return false; }
+  })();
+
+  return weekend || holiday || yearend;
 }
 
-// "HH:MM" -> "am" | "pm" に変換（利用者の預け希望時刻を内部 period へ）
-export function toPeriodFromTime(time: string | null | undefined): TimeSlot | null {
-  if (!time) return null;
-  const [hStr] = String(time).split(":");
-  const h = Number(hStr);
-  if (!Number.isFinite(h)) return null;
-  return h < 12 ? "am" : "pm";
+/** 受付ウィンドウ
+ *  - 00:00〜11:59 JST: 当日だけ受付
+ *  - 12:00〜23:59 JST: 翌日だけ受付
+ *  - それ以外は不可
+ */
+export function withinBookingWindow(dateStr: string): boolean {
+  const now = nowInJST();
+  const today = ymd(now);
+
+  const tmr = new Date(now);
+  tmr.setDate(now.getDate() + 1);
+  const tomorrow = ymd(tmr);
+
+  const hour = now.getHours();
+
+  if (dateStr === today) return hour < 12;
+  if (dateStr === tomorrow) return hour >= 12;
+  return false;
 }
 
-// 互換用エイリアス（過去コードで使っている可能性に対応）
-export const slotFromTimeStr = toPeriodFromTime;
-
-// 補助: 単純な可否（閉園でなく、かつ受付ウィンドウ内）
-export function canAcceptForDate(date: string | Date, now: Date = new Date()): boolean {
-  return !isClosedDate(date) && withinBookingWindow(date, now);
+/** 最終可否（UI/API 共通で利用可能） */
+export function canAcceptForDate(dateStr: string): boolean {
+  return withinBookingWindow(dateStr) && !isClosedDate(dateStr);
 }
