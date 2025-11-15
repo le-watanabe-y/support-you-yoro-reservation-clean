@@ -4,80 +4,80 @@ export const runtime = "nodejs";
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import {
-  isClosedDate,
-  withinBookingWindow,
-  toPeriodFromTime,
-  COUNT_STATUSES,
   LIMIT_DAILY,
   LIMIT_BY_PERIOD,
+  COUNT_STATUSES,
+  isClosedDate,          // 祝日/土日・年末年始
+  withinBookingWindow,   // 正午ルール（当日 or 翌日のみ）
 } from "@/lib/reservationRules";
 
 type Period = keyof typeof LIMIT_BY_PERIOD; // 'am' | 'pm'
 
-export async function GET(req: NextRequest) {
-  const url = new URL(req.url);
-  const date = url.searchParams.get("date"); // YYYY-MM-DD（必須）
-  const time = url.searchParams.get("time"); // HH:MM（任意）
+function toPeriodFromTime(hhmm: string): Period {
+  // AM/PM区分は内部用： 00:00-11:59 = am / 12:00-23:59 = pm
+  const [h] = hhmm.split(":").map((s) => parseInt(s, 10));
+  return h < 12 ? "am" : "pm";
+}
 
-  if (!date) {
-    return NextResponse.json(
-      { ok: false, message: 'query "date=YYYY-MM-DD" is required' },
-      { status: 400 }
-    );
+async function isManuallyClosed(date: string) {
+  const { data, error } = await supabaseAdmin
+    .from("booking_overrides")
+    .select("is_open")
+    .eq("date", date)
+    .maybeSingle();
+  if (error) return false;
+  return data ? data.is_open === false : false;
+}
+
+export async function GET(req: NextRequest) {
+  const date = new URL(req.url).searchParams.get("date") ?? "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return NextResponse.json({ ok: false, message: "date is required (YYYY-MM-DD)" }, { status: 400 });
   }
 
-  // 基本判定
-  const closed = isClosedDate(date);
-  const within = withinBookingWindow(date);
-  const period: Period | null = time ? toPeriodFromTime(time) : null;
+  const dailyLimit = LIMIT_DAILY ?? 6;
 
-  // カウント（DB）
-  let dailyUsed = 0;
-  let periodUsed = 0;
+  // 手動停止 or 祝日/休園判定
+  const manualClosed = await isManuallyClosed(date);
+  const holidayClosed = isClosedDate(date);
+  const closed = manualClosed || holidayClosed;
 
-  if (!closed) {
-    const { count: dCount, error: dErr } = await supabaseAdmin
+  // 受付ウィンドウ（正午ルール）
+  const win = withinBookingWindow(date);
+
+  // 使用数を集計
+  const used = { daily: 0, am: 0, pm: 0 };
+
+  // 1日合計
+  const { count: dailyUsed } = await supabaseAdmin
+    .from("reservations")
+    .select("id", { count: "exact", head: true })
+    .eq("preferred_date", date)
+    .in("status", COUNT_STATUSES as any);
+  used.daily = dailyUsed ?? 0;
+
+  // AM/PM
+  for (const p of ["am", "pm"] as const) {
+    const { count } = await supabaseAdmin
       .from("reservations")
       .select("id", { count: "exact", head: true })
       .eq("preferred_date", date)
+      .eq("time_slot", p)
       .in("status", COUNT_STATUSES as any);
-    if (dErr) return NextResponse.json({ ok: false, message: dErr.message }, { status: 500 });
-    dailyUsed = dCount ?? 0;
-
-    if (period) {
-      const { count: pCount, error: pErr } = await supabaseAdmin
-        .from("reservations")
-        .select("id", { count: "exact", head: true })
-        .eq("preferred_date", date)
-        .eq("time_slot", period)
-        .in("status", COUNT_STATUSES as any);
-      if (pErr) return NextResponse.json({ ok: false, message: pErr.message }, { status: 500 });
-      periodUsed = pCount ?? 0;
-    }
+    used[p] = count ?? 0;
   }
-
-  // 上限
-  const dailyLimit = LIMIT_DAILY ?? 6;
-  const dailyRemaining = Math.max(0, dailyLimit - dailyUsed);
-
-  const periodLimit = period ? (LIMIT_BY_PERIOD?.[period] ?? 6) : null;
-  const periodRemaining = periodLimit != null ? Math.max(0, periodLimit - periodUsed) : null;
-
-  // 予約可否
-  let canReserve = !closed && within && dailyRemaining > 0;
-  if (canReserve && periodRemaining != null) canReserve = periodRemaining > 0;
 
   return NextResponse.json({
     ok: true,
     date,
-    time,
-    period, // 'am' | 'pm' | null
-    closed,
-    withinBookingWindow: within,
-    canReserve,
-    daily: { used: dailyUsed, limit: dailyLimit, remaining: dailyRemaining },
-    period: period
-      ? { key: period, used: periodUsed, limit: periodLimit, remaining: periodRemaining }
-      : null,
+    closed,                     // true なら休園 or 手動停止
+    manualClosed,
+    withinBookingWindow: win,   // 受付時間内（正午ルール）
+    remaining: {
+      daily: Math.max(0, dailyLimit - used.daily),
+      am: Math.max(0, (LIMIT_BY_PERIOD.am ?? 6) - used.am),
+      pm: Math.max(0, (LIMIT_BY_PERIOD.pm ?? 6) - used.pm),
+    },
+    canReserve: !closed && win,
   });
 }
