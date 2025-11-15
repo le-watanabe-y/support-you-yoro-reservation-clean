@@ -16,13 +16,13 @@ type ResRow = {
 };
 
 type Person = {
-  key: string;                 // グループキー
-  guardian_name: string;       // 代表表示名
-  email: string;               // 代表メール
-  children: { name: string; birthdate?: string | null }[]; // 重複排除済み
-  first_date: string;          // 最初の利用日（preferred_date最小）
-  last_date: string;           // 最後の利用日（preferred_date最大）
-  count: number;               // 予約件数
+  key: string;
+  guardian_name: string;
+  email: string;
+  children: { name: string; birthdate?: string | null }[];
+  first_date: string;
+  last_date: string;
+  count: number;
 };
 
 const css: Record<string, React.CSSProperties> = {
@@ -38,17 +38,6 @@ const css: Record<string, React.CSSProperties> = {
   small: { fontSize: 12, color: "#64748B" },
   btn: { height: 34, padding: "0 10px", border: "1px solid #CBD5E1", borderRadius: 8, background: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" },
 };
-
-function ymd(d: Date) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-function nowJST() {
-  return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Tokyo" }));
-}
-const todayStr = () => ymd(nowJST());
 
 export default function PeoplePage() {
   const [rows, setRows] = useState<ResRow[]>([]);
@@ -73,7 +62,7 @@ export default function PeoplePage() {
     })();
   }, []);
 
-  // 期間フィルタ
+  // フィルタ
   const filtered = useMemo(() => {
     let arr = rows;
     if (start) arr = arr.filter((r) => r.preferred_date >= start);
@@ -90,10 +79,9 @@ export default function PeoplePage() {
     return arr;
   }, [rows, q, start, end]);
 
-  // 保護者（email+name）単位でグルーピング
+  // 保護者（email+name）で集計
   const people: Person[] = useMemo(() => {
     const map = new Map<string, Person>();
-
     for (const r of filtered) {
       const emailKey = (r.email ?? "").toLowerCase();
       const nameKey = r.guardian_name ?? "";
@@ -111,12 +99,10 @@ export default function PeoplePage() {
         });
       }
       const p = map.get(key)!;
-      // 件数
       p.count += 1;
-      // 初回/最終
       if (r.preferred_date < p.first_date) p.first_date = r.preferred_date;
       if (r.preferred_date > p.last_date)  p.last_date = r.preferred_date;
-      // 子ども重複排除
+
       const cname = (r.child_name ?? "").trim();
       const cb = (r.child_birthdate ?? "") || null;
       if (cname) {
@@ -124,12 +110,10 @@ export default function PeoplePage() {
         if (!exists) p.children.push({ name: cname, birthdate: cb });
       }
     }
-
     return Array.from(map.values()).sort((a, b) =>
       (a.guardian_name || "").localeCompare(b.guardian_name || ""))
   }, [filtered]);
 
-  // CSV ダウンロード（people用APIをコール）
   function downloadCSV() {
     const params = new URLSearchParams();
     if (start) params.set("start", start);
@@ -143,7 +127,6 @@ export default function PeoplePage() {
     <main style={css.wrap}>
       <h1 style={css.h1}>利用者一覧（予約実績ベース）</h1>
 
-      {/* ツールバー（検索・期間・CSV） */}
       <div style={css.card}>
         <div style={css.row}>
           <input
@@ -160,11 +143,10 @@ export default function PeoplePage() {
           <button style={css.btn} onClick={downloadCSV}>CSVダウンロード</button>
         </div>
         <div style={{ ...css.small, marginTop: 6 }}>
-          ※ この一覧は <code>reservations</code> テーブルの実績から集計しています（専用「会員」テーブルは不要）。スマホでも横スクロールで閲覧できます。
+          ※ この一覧は <code>reservations</code> テーブルの実績から集計しています。
         </div>
       </div>
 
-      {/* テーブル */}
       <div style={css.tableWrap}>
         <table style={css.table}>
           <thead>
@@ -202,11 +184,6 @@ export default function PeoplePage() {
             ))}
           </tbody>
         </table>
-      </div>
-
-      <div style={{ height: 14 }} />
-      <div style={css.small}>
-        ヒント：/admin と /admin/people は別ページです。ブックマークしておくと便利です。
       </div>
     </main>
   );
