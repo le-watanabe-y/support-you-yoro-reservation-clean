@@ -9,8 +9,8 @@ export const supabaseAdmin: SupabaseClient = createClient(url, serviceKey, {
   global: { headers: { "x-application-name": "support-reservation" } },
 });
 
-// 呼び出し側が () で使いたい場合のために関数も用意
+// () で呼びたい派のためのラッパー関数（どちらでも可）
 export const getSupabaseAdmin = (): SupabaseClient => supabaseAdmin;
 
-// named / default のどちらでも import できるようにしておく
+// named / default どちらでも import 可能に
 export default supabaseAdmin;
