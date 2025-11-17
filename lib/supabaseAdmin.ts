@@ -2,34 +2,42 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 /**
- * 環境変数は NEXT_PUBLIC_ とサーバ用の両方を許容。
- * ここでは「インポート時に throw しない」よう lazy 生成にします。
+ * 環境変数は NEXT_PUBLIC_ とサーバ用の両方に対応。
+ * インポート時に落ちないよう、lazy 生成にしてあります。
  */
 let cached: SupabaseClient | null = null;
 
-export function getSupabaseAdmin(): SupabaseClient {
-  if (cached) return cached;
-
+function buildClient(): SupabaseClient {
   const url =
     process.env.SUPABASE_URL ??
-    process.env.NEXT_PUBLIC_SUPABASE_URL ?? // 両対応
+    process.env.NEXT_PUBLIC_SUPABASE_URL ??
     "";
 
   const serviceKey =
     process.env.SUPABASE_SERVICE_ROLE_KEY ??
-    process.env.SUPABASE_SERVICE_KEY ?? // 念のための互換名
+    process.env.SUPABASE_SERVICE_KEY ??
     "";
 
   if (!url) throw new Error("SUPABASE_URL is required.");
   if (!serviceKey) throw new Error("SUPABASE_SERVICE_ROLE_KEY is required.");
 
-  cached = createClient(url, serviceKey, {
+  return createClient(url, serviceKey, {
     auth: { persistSession: false },
     global: { headers: { "x-application-name": "support-reservation" } },
   });
+}
 
+/** 現在推奨：関数として取得（lazy & singleton） */
+export function getSupabaseAdmin(): SupabaseClient {
+  if (cached) return cached;
+  cached = buildClient();
   return cached;
 }
 
-// 既存コードが default import を使っていても呼べるようにエイリアスを用意
-export default getSupabaseAdmin;
+/** 互換用：過去コードの { supabaseAdmin } 呼び出しに対応（関数として提供） */
+export function supabaseAdmin(): SupabaseClient {
+  return getSupabaseAdmin();
+}
+
+/** 互換用：default import でも使えるように */
+export default supabaseAdmin;
