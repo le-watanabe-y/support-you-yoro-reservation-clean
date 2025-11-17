@@ -1,34 +1,40 @@
 // app/api/admin/reservations/[id]/route.ts
-export const runtime = "nodejs";
-
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { okAuth } from "@/lib/adminAuth";
 
-type Params = { params: { id: string } };
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-export async function PATCH(req: NextRequest, { params }: Params) {
-  if (!okAuth(req)) {
-    return NextResponse.json({ ok: false, message: "unauthorized" }, { status: 401, headers: { "WWW-Authenticate": 'Basic realm="admin"' } });
-  }
-  const id = params.id;
-  let body: any;
+export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
   try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ ok: false, message: "invalid json" }, { status: 400 });
+    if (!okAuth(req)) return new NextResponse("unauthorized", { status: 401 });
+
+    const id = params.id;
+    const updates = await req.json();
+    const s = supabaseAdmin();
+
+    // 承認しようとしたら、添付必須
+    if (updates?.status === "approved") {
+      const { data: r, error } = await s
+        .from("reservations")
+        .select("doctor_note_path")
+        .eq("id", id)
+        .single();
+      if (error) throw error;
+      if (!r?.doctor_note_path) {
+        return NextResponse.json(
+          { ok: false, message: "医師連絡表の添付が必要です（承認できません）" },
+          { status: 400 }
+        );
+      }
+    }
+
+    const { error: upError } = await s.from("reservations").update(updates).eq("id", id);
+    if (upError) throw upError;
+
+    return NextResponse.json({ ok: true });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, message: e?.message ?? String(e) }, { status: 500 });
   }
-  const status = String(body?.status || "");
-
-  const ALLOWED = new Set(["pending", "approved", "rejected", "canceled"]);
-  if (!ALLOWED.has(status)) {
-    return NextResponse.json({ ok: false, message: "invalid status" }, { status: 400 });
-  }
-
-  // 変数としてそのまま使う（関数呼び出ししない）
-  const s = supabaseAdmin;
-  const { error } = await s.from("reservations").update({ status }).eq("id", id);
-
-  if (error) return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
-  return NextResponse.json({ ok: true });
 }
