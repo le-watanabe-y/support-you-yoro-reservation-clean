@@ -1,107 +1,75 @@
-export const runtime = "nodejs";
 import { NextRequest, NextResponse } from "next/server";
-import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import {
-  LIMIT_DAILY, LIMIT_BY_PERIOD, COUNT_STATUSES,
-  isClosedDate, withinBookingWindow, toPeriodFromTime,
-  type Period
-} from "@/lib/reservationRules";
+import { createClient } from "@supabase/supabase-js";
+import { randomUUID } from "crypto";
 
-type Status = "pending" | "approved" | "rejected" | "canceled";
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-function bad(msg: string, status = 400) {
-  return NextResponse.json({ ok: false, message: msg }, { status });
-}
-async function isManuallyClosed(date: string) {
-  const { data } = await supabaseAdmin
-    .from("booking_overrides")
-    .select("is_open")
-    .eq("date", date)
-    .maybeSingle();
-  return data ? data.is_open === false : false;
-}
-
-export async function GET(req: NextRequest) {
-  const u = new URL(req.url);
-  const date = u.searchParams.get("date"); // 任意
-  let q = supabaseAdmin
-    .from("reservations")
-    .select("id,status,preferred_date,dropoff_time,guardian_name,email,child_name,child_birthdate,created_at")
-    .order("created_at", { ascending: false })
-    .limit(500);
-  if (date) q = q.eq("preferred_date", date);
-  const { data, error } = await q;
-  if (error) return bad(error.message, 500);
-  return NextResponse.json({ ok: true, items: data ?? [] });
-}
+const supabase = createClient(
+  process.env.SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  { auth: { persistSession: false } }
+);
 
 export async function POST(req: NextRequest) {
-  let body: any;
-  try { body = await req.json(); } catch { return bad("invalid json"); }
+  try {
+    if (!(req.headers.get("content-type") ?? "").includes("multipart/form-data")) {
+      return NextResponse.json({ ok: false, message: "multipart/form-data で送信してください" }, { status: 400 });
+    }
 
-  const guardianName = (body.guardianName || body.guardian_name || "").trim();
-  const email = (body.email || "").trim();
-  const childName = (body.childName || body.child_name || null) as string | null;
-  const childBirthdate = (body.childBirthdate || body.child_birthdate || null) as string | null;
-  const preferredDate = (body.preferredDate || body.preferred_date || "").trim(); // YYYY-MM-DD
-  const dropoffTime = (body.dropoffTime || body.dropoff_time || "").trim();       // HH:MM
+    const form = await req.formData();
 
-  if (!guardianName || !email || !preferredDate || !dropoffTime) {
-    return bad("必須項目（保護者名 / メール / 日付 / 時刻）が足りません。");
-  }
+    const guardian_name = String(form.get("guardian_name") ?? "");
+    const guardian_phone = String(form.get("guardian_phone") ?? "");
+    const child_name = String(form.get("child_name") ?? "");
+    const child_birthdate = String(form.get("child_birthdate") ?? "");
+    const preferred_date = String(form.get("preferred_date") ?? "");
+    const dropoff_time = String(form.get("dropoff_time") ?? "");
 
-  if (isClosedDate(preferredDate)) return bad("休園日のため予約できません。");
-  if (await isManuallyClosed(preferredDate)) return bad("該当日は受付停止中です。");
-  if (!withinBookingWindow(preferredDate)) return bad("受付時間外のため予約できません。");
+    const file = form.get("medical_letter");
+    if (!(file instanceof Blob)) {
+      return NextResponse.json({ ok: false, message: "医師連絡表（画像 / PDF）の添付が必須です。" }, { status: 400 });
+    }
 
-  const period: Period = toPeriodFromTime(dropoffTime);
+    const mime = file.type || "application/octet-stream";
+    const okTypes = ["image/png", "image/jpeg", "application/pdf"];
+    if (!okTypes.includes(mime)) {
+      return NextResponse.json({ ok: false, message: "PNG / JPG / PDF のみ添付可能です。" }, { status: 400 });
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      return NextResponse.json({ ok: false, message: "ファイルサイズは 5MB 以内にしてください。" }, { status: 400 });
+    }
 
-  if (childName && childBirthdate) {
-    const { count } = await supabaseAdmin
+    const bytes = Buffer.from(await file.arrayBuffer());
+    const ext = mime === "application/pdf" ? "pdf" : mime === "image/png" ? "png" : "jpg";
+    const filename = `${randomUUID()}.${ext}`;
+    const objectPath = `medical-letters/${filename}`;
+
+    const { error: upErr } = await supabase.storage.from("medical-letters").upload(objectPath, bytes, {
+      contentType: mime,
+      upsert: false,
+    });
+    if (upErr) return NextResponse.json({ ok: false, message: `アップロード失敗: ${upErr.message}` }, { status: 500 });
+
+    const { data, error } = await supabase
       .from("reservations")
-      .select("id", { count: "exact", head: true })
-      .eq("preferred_date", preferredDate)
-      .eq("child_name", childName)
-      .eq("child_birthdate", childBirthdate)
-      .in("status", COUNT_STATUSES as any);
-    if ((count ?? 0) > 0) return bad("同じお子さまの同日予約がすでにあります。");
+      .insert({
+        guardian_name,
+        guardian_phone,
+        child_name,
+        child_birthdate,
+        preferred_date,
+        dropoff_time,
+        medical_letter_path: objectPath,
+        medical_letter_mime: mime,
+      })
+      .select("id, status")
+      .single();
+
+    if (error) return NextResponse.json({ ok: false, message: error.message }, { status: 500 });
+    return NextResponse.json({ ok: true, id: data.id, status: data.status });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, message: e?.message ?? "server error" }, { status: 500 });
   }
-
-  const { count: dailyUsed } = await supabaseAdmin
-    .from("reservations")
-    .select("id", { count: "exact", head: true })
-    .eq("preferred_date", preferredDate)
-    .in("status", COUNT_STATUSES as any);
-  if ((dailyUsed ?? 0) >= (LIMIT_DAILY ?? 6)) return bad("本日の枠は満席です。");
-
-  const { count: slotUsed } = await supabaseAdmin
-    .from("reservations")
-    .select("id", { count: "exact", head: true })
-    .eq("preferred_date", preferredDate)
-    .eq("time_slot", period)
-    .in("status", COUNT_STATUSES as any);
-  if ((slotUsed ?? 0) >= (LIMIT_BY_PERIOD?.[period] ?? 6)) {
-    return bad("指定の時間帯は満席です。別の時刻をご検討ください。");
-  }
-
-  const autoApproveThreshold = 2;
-  const status: Status = (dailyUsed ?? 0) < autoApproveThreshold ? "approved" : "pending";
-
-  const { data, error } = await supabaseAdmin
-    .from("reservations")
-    .insert({
-      guardian_name: guardianName,
-      email,
-      child_name: childName,
-      child_birthdate: childBirthdate,
-      preferred_date: preferredDate,
-      dropoff_time: dropoffTime,
-      time_slot: period,
-      status,
-    })
-    .select()
-    .single();
-  if (error) return bad(error.message, 500);
-
-  return NextResponse.json({ ok: true, id: data.id, status });
 }
