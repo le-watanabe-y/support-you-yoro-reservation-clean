@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
-import { FACILITY } from '@/lib/facility-info.mjs';
+import { ORGANIZATION } from '@/lib/facility-info.mjs';
 
-export const metadata: Metadata = { title: `利用規約・個人情報の取扱い｜${FACILITY.shortName}` };
+export const metadata: Metadata = { title: `利用規約・個人情報の取扱い｜${ORGANIZATION.serviceName}` };
 
 // Text reviewed by the facility before public release (see README「公開前の確認事項」).
 export default function Terms() {
@@ -9,7 +9,7 @@ export default function Terms() {
     <p><a href="/">← 予約画面へ戻る</a></p>
     <section className="panel">
       <h1>利用規約・個人情報の取扱い</h1>
-      <p>この規約は、{FACILITY.operator}（以下「当社」）が運営する{FACILITY.name}（以下「施設」）の予約サイト（以下「本サービス」）の利用について定めます。</p>
+      <p>この規約は、{ORGANIZATION.operator}（以下「当社」）が運営する病児保育施設（以下「施設」）の予約サイト「{ORGANIZATION.serviceName}」（以下「本サービス」）の利用について定めます。施設ごとの開所日・料金・利用条件などは、各施設のご利用案内に従います。</p>
 
       <h2>1. 本サービスの内容</h2>
       <ol>
@@ -22,7 +22,7 @@ export default function Terms() {
       <ol>
         <li>登録内容は正確に入力し、変更があれば速やかに更新してください。</li>
         <li>アカウントのパスワードは第三者に知られないよう管理してください。</li>
-        <li>当日の急ぎの連絡は、本サービスではなく施設へお電話ください{FACILITY.phone ? `（${FACILITY.phone}）` : ''}。</li>
+        <li>当日の急ぎの連絡は、本サービスではなく、ご利用の施設へお電話ください（電話番号は各施設のページに記載しています）。</li>
       </ol>
 
       <h2>3. 取り扱う個人情報</h2>
@@ -51,10 +51,10 @@ export default function Terms() {
       <p>記録は、児童福祉法等の関係法令や自治体の定めに従い、必要な期間保存した後に削除します。</p>
 
       <h2>8. 開示・訂正・削除の請求</h2>
-      <p>ご自身の個人情報の開示・訂正・利用停止・削除をご希望の場合は、施設の窓口へお申し出ください。本人確認のうえ対応します。</p>
+      <p>ご自身の個人情報の開示・訂正・利用停止・削除をご希望の場合は、ご利用の施設の窓口へお申し出ください。本人確認のうえ対応します。登録情報は施設ごとに管理され、ほかの施設と共有しません。</p>
 
       <h2>9. お問い合わせ</h2>
-      <p>{FACILITY.name}{FACILITY.phone && <> 電話 {FACILITY.phone}</>}{FACILITY.address && <><br />{FACILITY.address}</>}<br />運営：{FACILITY.operator}</p>
+      <p>ご利用の施設の窓口（各施設のページに記載）または運営会社へお問い合わせください。<br />運営：{ORGANIZATION.operator}{ORGANIZATION.contact && <><br />{ORGANIZATION.contact}</>}</p>
 
       <h2>10. 改定</h2>
       <p>本規約を改定する場合は、本サービス上でお知らせします。</p>

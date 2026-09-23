@@ -5,7 +5,7 @@ import { externalLinePath } from '@/lib/line-entry.mjs';
 export function LineBrowserHelp({ staff = false }: { staff?: boolean }) {
   const [href, setHref] = useState('');
   useEffect(() => {
-    if (/\bLine\//i.test(navigator.userAgent)) setHref(externalLinePath(location.search, staff));
+    if (/\bLine\//i.test(navigator.userAgent)) setHref(externalLinePath(location.pathname, location.search));
   }, [staff]);
   if (!href) return null;
   return <details className="line-browser-help">

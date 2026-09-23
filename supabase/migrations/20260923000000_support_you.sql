@@ -3,6 +3,16 @@
 -- object. All reads and writes go through the Next.js API with the service-role key,
 -- which authorizes every operation (lib/server/api.mjs, lib/facility-service.mjs).
 
+-- Facility directory. Each facility's data and house rules live in its own aggregate row
+-- (supportyou_state id 'facility-v1:<id>'), so facilities never share or block each other.
+create table public.supportyou_facilities (
+  id text primary key check (id ~ '^[a-z0-9][a-z0-9-]{1,30}$'),
+  name text not null,
+  municipality text not null default '',
+  active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
 -- Facility aggregate: one row per facility, updated only by compare-and-swap.
 create table public.supportyou_state (
   id text primary key,
@@ -21,8 +31,8 @@ create table public.supportyou_booking_archive (
   data jsonb not null,
   archived_at timestamptz not null default now()
 );
-create index supportyou_booking_archive_owner on public.supportyou_booking_archive(owner, date);
-create index supportyou_booking_archive_date on public.supportyou_booking_archive(date);
+create index supportyou_booking_archive_owner on public.supportyou_booking_archive(facility_key, owner, date);
+create index supportyou_booking_archive_date on public.supportyou_booking_archive(facility_key, date);
 
 create table public.supportyou_audit_archive (
   id uuid primary key,
@@ -36,12 +46,14 @@ create index supportyou_audit_archive_at on public.supportyou_audit_archive(at);
 create table public.supportyou_identities (
   subject uuid primary key references auth.users(id) on delete cascade,
   email text not null default '',
+  name text not null default '',
   kind text not null check (kind in ('parent', 'staff')),
+  org_role text check (org_role in ('owner') and kind = 'staff'),
   blocked boolean not null default false,
   created_at timestamptz not null default now()
 );
 
--- Records that the first administrator exists (single row).
+-- Records that the first headquarters owner exists (single row).
 create table public.supportyou_config (
   id boolean primary key default true check (id),
   bootstrap_subject uuid references auth.users(id),
@@ -53,7 +65,8 @@ create table public.supportyou_staff_invites (
   email text not null,
   name text not null,
   code_hash text not null check (length(code_hash) = 64),
-  permission text not null check (permission in ('admin', 'operator')),
+  permission text not null check (permission in ('owner', 'admin', 'operator')),
+  facility_id text references public.supportyou_facilities(id) on delete cascade,
   expires_at timestamptz not null,
   attempts integer not null default 0 check (attempts between 0 and 5),
   created_by uuid references auth.users(id) on delete set null,
@@ -61,9 +74,10 @@ create table public.supportyou_staff_invites (
   used_at timestamptz,
   revoked_at timestamptz,
   activated_subject uuid references auth.users(id) on delete set null,
-  check (expires_at > created_at)
+  check (expires_at > created_at),
+  check ((permission = 'owner') = (facility_id is null))
 );
-create unique index supportyou_staff_invites_live_email on public.supportyou_staff_invites(email) where used_at is null and revoked_at is null;
+create unique index supportyou_staff_invites_live_email on public.supportyou_staff_invites(email, coalesce(facility_id, '')) where used_at is null and revoked_at is null;
 
 create table public.supportyou_rate (
   key text primary key,
@@ -83,12 +97,14 @@ create index supportyou_security_events_time on public.supportyou_security_event
 
 create table public.supportyou_notifications (
   id bigint generated always as identity primary key,
+  facility_id text,
   kind text not null,
   recipient_role text not null,
   status text not null check (status in ('sent', 'failed', 'skipped')),
   error text,
   created_at timestamptz not null default now()
 );
+create index supportyou_notifications_facility on public.supportyou_notifications(facility_id, created_at);
 
 create table public.supportyou_orphan_documents (
   object_key text primary key,
@@ -127,22 +143,26 @@ begin
   return count_now <= p_max;
 end $$;
 
--- Checks an invitation code without consuming it. Wrong codes count toward a limit of 5.
+-- Checks an invitation code without consuming it. A person may hold live invitations for
+-- several facilities; a wrong code counts toward a limit of 5 on all of them.
 create function public.supportyou_verify_staff_invite(p_email text, p_hash text)
-returns table(invite_id uuid, permission text, name text)
+returns table(invite_id uuid, permission text, name text, facility_id text)
 language plpgsql security invoker set search_path = '' as $$
 declare v public.supportyou_staff_invites%rowtype;
 begin
-  select * into v from public.supportyou_staff_invites
-    where email = p_email and used_at is null and revoked_at is null for update;
-  if not found or v.expires_at <= now() or v.attempts >= 5 then return; end if;
-  if v.code_hash <> p_hash then
-    update public.supportyou_staff_invites set attempts = least(5, attempts + 1) where id = v.id;
+  select * into v from public.supportyou_staff_invites i
+    where i.email = p_email and i.code_hash = p_hash and i.used_at is null and i.revoked_at is null
+      and i.expires_at > now() and i.attempts < 5
+    for update;
+  if not found then
+    update public.supportyou_staff_invites i set attempts = least(5, i.attempts + 1)
+      where i.email = p_email and i.used_at is null and i.revoked_at is null;
     return;
   end if;
-  return query select v.id, v.permission, v.name;
+  return query select v.id, v.permission, v.name, v.facility_id;
 end $$;
 
+alter table public.supportyou_facilities enable row level security;
 alter table public.supportyou_state enable row level security;
 alter table public.supportyou_booking_archive enable row level security;
 alter table public.supportyou_audit_archive enable row level security;
@@ -154,11 +174,11 @@ alter table public.supportyou_security_events enable row level security;
 alter table public.supportyou_notifications enable row level security;
 alter table public.supportyou_orphan_documents enable row level security;
 
-revoke all on public.supportyou_state, public.supportyou_booking_archive, public.supportyou_audit_archive,
+revoke all on public.supportyou_facilities, public.supportyou_state, public.supportyou_booking_archive, public.supportyou_audit_archive,
   public.supportyou_identities, public.supportyou_config, public.supportyou_staff_invites, public.supportyou_rate,
   public.supportyou_security_events, public.supportyou_notifications, public.supportyou_orphan_documents
   from public, anon, authenticated;
-grant select, insert, update on public.supportyou_state, public.supportyou_booking_archive, public.supportyou_audit_archive,
+grant select, insert, update on public.supportyou_facilities, public.supportyou_state, public.supportyou_booking_archive, public.supportyou_audit_archive,
   public.supportyou_identities, public.supportyou_config, public.supportyou_staff_invites, public.supportyou_rate,
   public.supportyou_orphan_documents to service_role;
 grant select, insert on public.supportyou_security_events, public.supportyou_notifications to service_role;

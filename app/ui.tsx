@@ -10,7 +10,7 @@ import { AlertDialog, AlertDialogTrigger, AlertDialogContent, AlertDialogTitle, 
 import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from '@/components/ui/empty';
 import { useStepFocus } from './interaction';
 import { LineBrowserHelp } from './line-browser-help';
-import { FACILITY } from '@/lib/facility-info.mjs';
+import { ORGANIZATION } from '@/lib/facility-info.mjs';
 export { Input, Textarea };
 export function Button({ type = 'button', ...props }: ComponentProps<typeof BaseButton>) { return <BaseButton type={type} {...props} />; }
 export const templates = {
@@ -34,20 +34,21 @@ export function Panel({ title, children, aside, id, autoReveal = false, step }: 
 export function Blank({ title, description }: { title: string, description: string }) { return <Empty className="empty"><EmptyHeader><EmptyTitle>{title}</EmptyTitle><EmptyDescription>{description}</EmptyDescription></EmptyHeader></Empty>; }
 export function Badge({ children, status = '' }: { children: ReactNode, status?: string }) { return <span className={'badge ' + status}>{children}</span>; }
 export function Confirm({ label, description, onConfirm, disabled = false }: { label: string, description: string, onConfirm: () => void, disabled?: boolean }) { return <AlertDialog><AlertDialogTrigger asChild><Button variant="outline" disabled={disabled}>{label}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogTitle>{label}しますか？</AlertDialogTitle><AlertDialogDescription>{description}</AlertDialogDescription><AlertDialogFooter><AlertDialogCancel>戻る</AlertDialogCancel><AlertDialogAction onClick={onConfirm}>{label}する</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>; }
-export function Frame({ staff = false, authenticated, onLogout, children }: { staff?: boolean, authenticated?: boolean, onLogout?: () => void, children: ReactNode }) {
-  return <><header className="site-header"><div><a href={staff ? '/staff' : '/'} className="brand">Support <span>you</span></a><p>{FACILITY.name} <span className="divider">/</span> {staff ? '職員用' : '保護者用予約'}</p></div>{authenticated && <Button variant="outline" onClick={onLogout}>ログアウト</Button>}</header><main className={staff ? 'main staff-main' : 'main'}>{children}<LineBrowserHelp staff={staff} /></main><footer>{FACILITY.name}{FACILITY.phone && <> ・ 電話 <a href={`tel:${FACILITY.phone}`}>{FACILITY.phone}</a></>}<br />{FACILITY.hours}<br /><a href="/terms">利用規約・個人情報の取扱い</a></footer></>;
+export function Frame({ staff = false, authenticated, onLogout, facility, children }: { staff?: boolean, authenticated?: boolean, onLogout?: () => void, facility?: { id?: string, name?: string, phone?: string, address?: string } | null, children: ReactNode }) {
+  const home = staff ? '/staff' : facility?.id ? `/f/${facility.id}` : '/';
+  return <><header className="site-header"><div><a href={home} className="brand">Support <span>you</span></a><p>{facility?.name || ORGANIZATION.serviceName} <span className="divider">/</span> {staff ? '職員用' : '保護者用予約'}</p></div>{authenticated && <Button variant="outline" onClick={onLogout}>ログアウト</Button>}</header><main className={staff ? 'main staff-main' : 'main'}>{children}<LineBrowserHelp staff={staff} /></main><footer>{facility?.name ? <>{facility.name}{facility.phone && <> ・ 電話 <a href={`tel:${facility.phone}`}>{facility.phone}</a></>}{facility.address && <><br />{facility.address}</>}<br /></> : null}{!staff && <><a href="/">施設の一覧</a> ・ </>}<a href="/terms">利用規約・個人情報の取扱い</a><br />運営：{ORGANIZATION.operator}</footer></>;
 }
 
 type Api = ReturnType<typeof useApi>;
-export function useApi(role: 'parent' | 'staff') {
+export function useApi(role: 'parent' | 'staff', facilityId = '') {
   const [state, setState] = useState<any>(null), [error, setError] = useState(''), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false), [checking, setChecking] = useState(false);
   const sending = useRef(false), generation = useRef(0), lastChecked = useRef(0), refreshing = useRef<Promise<void> | null>(null);
   const request = useCallback(async (path: string, options: RequestInit = {}) => {
     const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), path === 'state' ? 20000 : 60000);
-    try { const response = await fetch(`/api/${role}/${path}`, { ...options, credentials: 'same-origin', cache: 'no-store', signal: controller.signal }); let data; try { data = await response.json(); } catch { throw new Error('応答を確認できません。最新情報を読み直して、保存結果を確認してください。'); } return { response, data }; }
+    try { const response = await fetch(`/api/${role}/${path}${facilityId ? `?f=${encodeURIComponent(facilityId)}` : ''}`, { ...options, credentials: 'same-origin', cache: 'no-store', signal: controller.signal }); let data; try { data = await response.json(); } catch { throw new Error('応答を確認できません。最新情報を読み直して、保存結果を確認してください。'); } return { response, data }; }
     catch (e: any) { if (e.name === 'AbortError') throw new Error(path === 'state' ? '読込みに時間がかかっています。通信を確認して、もう一度読み直してください。' : '通信の確認に時間がかかっています。保存結果は未確認です。最新情報を読み直してから再操作してください。'); if (e instanceof TypeError) throw new Error('通信できません。電波の良い場所で、最新情報を読み直してから再操作してください。'); throw e; }
     finally { clearTimeout(timeout); }
-  }, [role]);
+  }, [role, facilityId]);
   const failure = (d: any, fallback: string) => (d.error || fallback) + (d.requestId ? `（確認番号：${d.requestId.slice(0, 8)}）` : '');
   const refresh = useCallback(() => {
     if (refreshing.current) return refreshing.current;
@@ -55,6 +56,9 @@ export function useApi(role: 'parent' | 'staff') {
     const job = (async () => { const { response: r, data: d } = await request('state'); if (version !== generation.current) return; if (!r.ok) { if (r.status === 401) setState({ authenticated: false }); throw new Error(failure(d, '画面を読み込めません。')); } lastChecked.current = Date.now(); setState(d); })();
     refreshing.current = job; void job.finally(() => { if (refreshing.current === job) refreshing.current = null; }).catch(() => {}); return job;
   }, [request]);
+  // Switching facility discards any in-flight answer for the previous one.
+  const shown = useRef(facilityId);
+  if (shown.current !== facilityId) { shown.current = facilityId; generation.current++; refreshing.current = null; }
   useEffect(() => { const timer = setTimeout(() => { void refresh().catch(e => setError(e.message)); }, 0); const resume = () => { if (document.visibilityState === 'visible' && !sending.current && Date.now() - lastChecked.current >= 30000) void refresh().catch(e => setError(e.message)); }; window.addEventListener('pageshow', resume); document.addEventListener('visibilitychange', resume); return () => { clearTimeout(timer); window.removeEventListener('pageshow', resume); document.removeEventListener('visibilitychange', resume); }; }, [refresh]);
   const send = async (path: string, init: RequestInit, success: string) => {
     if (sending.current) return null; sending.current = true; generation.current++; setBusy(true); setError(''); setNotice('');

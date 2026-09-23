@@ -16,10 +16,11 @@ function world(now = '2026-10-04T13:00:00+09:00') {
   let clock = new Date(now).toISOString();
   const backend = createMemoryBackend({ now: () => clock });
   const tasks = [];
-  const client = role => {
+  const client = (role, facility = 'yoro') => {
     const jar = new Map();
-    const call = async (action, { body, method, headers = {}, form, query = '' } = {}) => {
-      const isGet = method === 'GET' || ['state', 'document', 'export', 'backup'].includes(action) && body === undefined && !form;
+    const call = async (action, { body, method, headers = {}, form, query = '', f = facility } = {}) => {
+      query = f ? (query ? `${query}&f=${f}` : `?f=${f}`) : query;
+      const isGet = method === 'GET' || ['state', 'document', 'export', 'backup', 'facilities'].includes(action) && body === undefined && !form;
       const cookie = [...jar].map(([k, v]) => `${k}=${v}`).join('; ');
       const init = { method: isGet ? 'GET' : 'POST', headers: { cookie, ...(isGet ? {} : { origin: ORIGIN, 'x-supportyou-request': '1' }), ...(form ? {} : isGet ? {} : { 'content-type': 'application/json' }), ...headers } };
       if (!isGet) init.body = form || JSON.stringify(body ?? {});
@@ -32,7 +33,7 @@ function world(now = '2026-10-04T13:00:00+09:00') {
   };
   return { backend, client, tasks, setClock: v => { clock = new Date(v).toISOString(); } };
 }
-async function admin(w) { const staff = w.client('staff'); await staff.ok('setup', { body: { email: 'admin@example.jp', password: 'admin-password-1', name: '園長', setupCode: SETUP } }); return staff; }
+async function admin(w) { const staff = w.client('staff'); await staff.ok('setup', { body: { email: 'admin@example.jp', password: 'admin-password-1', name: '園長', setupCode: SETUP, facilityId: 'yoro', facilityName: '病児保育室 養老' } }); return staff; }
 async function parent(w, address = 'parent@example.jp') {
   const p = w.client('parent');
   await p.ok('signup', { body: { email: address, password: 'parent-password-1', consent: true } });
@@ -42,9 +43,9 @@ async function parent(w, address = 'parent@example.jp') {
 test('setup requires the deploy-time code and only works once', async () => {
   const w = world(), staff = w.client('staff');
   assert.equal((await staff.ok('state')).setupAvailable, true);
-  assert.equal((await staff.call('setup', { body: { email: 'a@example.jp', password: 'admin-password-1', setupCode: 'wrong-code-wrong-code' } })).status, 403);
+  assert.equal((await staff.call('setup', { body: { email: 'a@example.jp', password: 'admin-password-1', setupCode: 'wrong-code-wrong-code', facilityId: 'yoro', facilityName: 'x' } })).status, 403);
   await admin(w);
-  assert.equal((await w.client('staff').call('setup', { body: { email: 'b@example.jp', password: 'admin-password-1', setupCode: SETUP } })).status, 409);
+  assert.equal((await w.client('staff').call('setup', { body: { email: 'b@example.jp', password: 'admin-password-1', setupCode: SETUP, facilityId: 'other', facilityName: 'x' } })).status, 409);
   assert.equal((await w.client('staff').ok('state')).setupAvailable, false);
 });
 
@@ -142,7 +143,10 @@ test('staff invitation: code shown once, used once, operator permissions', async
   const s = await staff.ok('state');
   const member = s.staff.find(m => m.email === 'sato@example.jp');
   await staff.ok('staff-membership', { body: { memberId: member.id, version: member.version, permission: 'operator', active: false } });
-  assert.equal((await nurse.call('state')).status, 403);
+  const after = await nurse.ok('state');
+  assert.deepEqual(after.facilities, []);
+  assert.equal(after.bookings, undefined);
+  assert.equal((await nurse.call('confirm', { body: {} })).status, 403);
 });
 
 test('password reset link signs in and allows a new password', async () => {
@@ -169,7 +173,7 @@ test('CSV export neutralizes spreadsheet formulas and is staff only', async () =
   const csv = await staff.call('export', { query: '?from=2026-10-01&to=2026-10-31' });
   assert.equal(csv.status, 200);
   const text = new TextDecoder('utf-8', { ignoreBOM: true }).decode(csv.data);
-  assert.ok(text.startsWith('﻿"利用日"'));
+  assert.ok(text.startsWith('﻿"施設","利用日"'));
   assert.ok(text.includes(`"'=HYPERLINK(""x"")"`));
   assert.equal((await p.call('export', { method: 'GET' })).status, 404);
 });
@@ -186,4 +190,54 @@ test('expired access token is renewed from the refresh cookie', async () => {
   const r = await p.ok('state');
   assert.equal(r.authenticated, false);
   assert.equal(p.jar.size, 0);
+});
+
+test('multiple facilities: owner creates, staff are scoped, parents use one account per facility', async () => {
+  const w = world(); const owner = await admin(w);
+  await owner.ok('facility-create', { body: { id: 'ogaki', name: '病児保育室 大垣', municipality: '大垣市' }, f: '' });
+  assert.equal((await owner.call('facility-create', { body: { id: 'ogaki', name: 'x' }, f: '' })).status, 409);
+  assert.equal((await owner.call('facility-create', { body: { id: 'Bad ID', name: 'x' }, f: '' })).status, 400);
+  const top = await owner.ok('state', { f: '' });
+  assert.deepEqual(top.facilities.map(f => f.id).sort(), ['ogaki', 'yoro']);
+  // Different house rules per facility.
+  const og = await owner.ok('state', { f: 'ogaki' });
+  await owner.ok('update-settings', { body: { version: og.settings.version, settings: { ...og.settings, openWeekdays: [1, 2, 3, 4, 5, 6], dailyCapacity: 3 } }, f: 'ogaki' });
+  assert.equal((await owner.ok('state', { f: 'ogaki' })).settings.dailyCapacity, 3);
+  assert.equal((await owner.ok('state', { f: 'yoro' })).settings.dailyCapacity, 6);
+  // A nurse invited to 大垣 only.
+  const invite = await owner.ok('staff-invite', { body: { name: '看護師 田中', email: 'tanaka@example.jp', permission: 'admin' }, f: 'ogaki' });
+  const nurse = w.client('staff', 'ogaki');
+  await nurse.ok('activate', { body: { email: 'tanaka@example.jp', password: 'nurse-password-1', code: invite.code } });
+  assert.deepEqual((await nurse.ok('state', { f: '' })).facilities.map(f => f.id), ['ogaki']);
+  assert.equal((await nurse.call('update-settings', { body: {}, f: 'yoro' })).status, 403);
+  assert.equal((await nurse.call('export', { f: 'yoro' })).status, 403);
+  assert.equal((await nurse.call('facility-create', { body: { id: 'x1', name: 'x' }, f: '' })).status, 403);
+  // Later invited to 養老 too: joins with the same account.
+  const second = await owner.ok('staff-invite', { body: { name: '看護師 田中', email: 'tanaka@example.jp', permission: 'operator' }, f: 'yoro' });
+  await nurse.ok('join', { body: { code: second.code }, f: '' });
+  assert.deepEqual((await nurse.ok('state', { f: '' })).facilities.map(f => f.id).sort(), ['ogaki', 'yoro']);
+  assert.equal((await nurse.ok('state', { f: 'yoro' })).permission, 'operator');
+  // One parent account, separate households and bookings per facility.
+  const p = await parent(w);
+  await p.ok('register-child', { body: profile });
+  const pOg = w.client('parent', 'ogaki'); for (const [k, v] of p.jar) pOg.jar.set(k, v);
+  const inOgaki = await pOg.ok('state');
+  assert.equal(inOgaki.user.complete, false, 'registration is reviewed per facility');
+  assert.equal(inOgaki.children.length, 0);
+  assert.equal((await owner.ok('state', { f: 'ogaki' })).children.length, 0);
+  // Deactivated facility is hidden from parents.
+  await owner.ok('facility-active', { body: { id: 'ogaki', active: false }, f: '' });
+  assert.equal((await pOg.call('state')).status, 404);
+  assert.deepEqual((await w.client('parent', '').ok('facilities')).facilities.map(f => f.id), ['yoro']);
+});
+
+test('HQ owners can be invited and see every facility', async () => {
+  const w = world(); const owner = await admin(w);
+  await owner.ok('facility-create', { body: { id: 'ogaki', name: '大垣' }, f: '' });
+  const invite = await owner.ok('owner-invite', { body: { name: '本部 鈴木', email: 'suzuki@example.jp' }, f: '' });
+  const hq = w.client('staff', '');
+  const joined = await hq.ok('activate', { body: { email: 'suzuki@example.jp', password: 'hq-password-001', code: invite.code } });
+  assert.equal(joined.state.owner, true);
+  assert.deepEqual(joined.state.facilities.map(f => f.id).sort(), ['ogaki', 'yoro']);
+  assert.equal((await hq.ok('state', { f: 'ogaki' })).permission, 'admin');
 });

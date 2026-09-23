@@ -19,7 +19,8 @@ async function fixture(start = `${DAY.replace('05', '04')}T13:00:00+09:00`) {
   let now = new Date(start).toISOString();
   const repo = new MemoryRepository(), store = new MemoryDocuments();
   const app = new FacilityService(repo, { facilityId: 'support-you', documentStore: store, now: () => now });
-  await app.bootstrapAdmin(ADMIN, { name: '管理者', email: 'admin@example.com' });
+  await app.initialize({ name: '病児保育室 テスト' });
+  await app.ensureOwner(ADMIN, { name: '管理者', email: 'admin@example.com' });
   return { app, repo, store, setClock: value => { now = new Date(value).toISOString(); } };
 }
 async function child(app, subject = A, overrides = {}) {
@@ -202,7 +203,6 @@ test('staff management: operator limits, last admin protection, invitations', as
   await rejectsStatus(app.staffMembership(ADMIN, { memberId: admin.id, permission: 'admin', active: false, version: admin.version }), 409);
   await app.staffMembership(ADMIN, { memberId: invited.id, permission: 'operator', active: false, version: 1 });
   await rejectsStatus(app.read('fixture-operator', 'staff'), 403);
-  await rejectsStatus(app.bootstrapAdmin('someone-else'), 409);
 });
 
 test('document storage failure leaves the booking unchanged and quarantines attempted keys', async () => {
@@ -253,7 +253,80 @@ test('finished bookings are archived after 45 days and stay in the parent histor
   await app.openHousehold(B); // any write compacts
   const s = await app.state();
   assert.equal(s.bookings.length, 0);
-  const archived = await repo.listArchivedBookings({ owner: (await app.read(A, 'parent')).user.householdId });
+  const archived = await app.archived({ owner: (await app.read(A, 'parent')).user.householdId });
   assert.equal(archived.length, 1);
   assert.equal(archived[0].data.booking.status, 'cancelled');
+});
+
+// ---- Per-facility house rules ----
+async function withRules(app, change) {
+  const s = await app.read(ADMIN, 'staff');
+  const settings = structuredClone(s.settings);
+  change(settings);
+  return app.command(ADMIN, 'staff', 'update-settings', { version: s.settings.version, settings });
+}
+
+test('two facilities keep separate data and separate house rules', async () => {
+  const repo = new MemoryRepository(), store = new MemoryDocuments();
+  const now = () => new Date('2026-10-04T13:00:00+09:00').toISOString();
+  const yoro = new FacilityService(repo, { facilityId: 'yoro', documentStore: store, now });
+  const ogaki = new FacilityService(repo, { facilityId: 'ogaki', documentStore: store, now });
+  for (const [app, name] of [[yoro, '養老'], [ogaki, '大垣']]) { await app.initialize({ name }); await app.ensureOwner(ADMIN); }
+  await withRules(ogaki, s => { s.openWeekdays = [0, 1, 2, 3, 4, 5, 6]; s.dailyCapacity = 2; });
+  const c = await child(yoro);
+  await reserve(yoro, A, c.id);
+  assert.equal((await ogaki.read(ADMIN, 'staff')).bookings.length, 0, 'bookings never leak between facilities');
+  await rejectsStatus(ogaki.read(A, 'parent'), 403);
+  const yoroState = await yoro.state(), ogakiState = await ogaki.state();
+  assert.equal(availability(yoroState, '2026-10-10'), '休園'); // Saturday closed in 養老
+  assert.equal(availability(ogakiState, '2026-10-10'), '受付開始前'); // open in 大垣
+  assert.equal((await ogaki.read(ADMIN, 'staff')).settings.dailyCapacity, 2);
+  assert.equal((await yoro.read(ADMIN, 'staff')).settings.dailyCapacity, 6);
+});
+
+test('house rules drive capacity, waitlist, fees, age limits and documents', async () => {
+  const { app, setClock } = await fixture();
+  await withRules(app, s => {
+    s.dailyCapacity = 1; s.waitlist = false; s.requireMedicineDoc = false; s.ageMinMonths = 12; s.ageMaxYears = 6;
+    s.rooms = [{ name: '1号室', capacity: 1 }]; s.groups = ['感染症', '非感染症'];
+    s.fees = [{ maxHours: 2, amount: 500 }, { maxHours: 5, amount: 1500 }, { maxHours: null, amount: 2500 }];
+  });
+  await app.openHousehold(A);
+  await rejectsStatus(app.command(A, 'parent', 'register-child', { ...profile, birth: '2015-01-01' }), 400); // over 6
+  const baby = await app.command(A, 'parent', 'register-child', { ...profile, name: '赤ちゃん', birth: '2026-03-01' });
+  await rejectsStatus(reserve(app, A, baby.id), 409); // under 12 months on the day
+  const c = await app.command(A, 'parent', 'register-child', profile);
+  const b = await reserve(app, A, c.id, { medication: true });
+  await app.submitDocuments(A, { id: b.id, version: 1, files: [pdf('physician')] }); // medicine doc optional here
+  let current = await booking(app, ADMIN, b.id, 'staff');
+  await rejectsStatus(app.command(ADMIN, 'staff', 'confirm', confirmation(current)), 400); // room A no longer exists
+  await app.command(ADMIN, 'staff', 'confirm', confirmation(current, { room: '1号室', group: '感染症' }));
+  const other = await child(app, B, { name: '二人目' });
+  assert.equal((await app.read(B, 'parent')).availability.find(d => d.date === DAY).status, '満員');
+  await rejectsStatus(reserve(app, B, other.id), 409); // no waitlist in this facility
+  setClock(`${DAY}T09:00:00+09:00`);
+  current = await booking(app, ADMIN, b.id, 'staff');
+  await app.command(ADMIN, 'staff', 'check-in', { id: b.id, version: current.version, checked: true });
+  setClock(`${DAY}T13:00:00+09:00`); // 4 hours → second tier
+  current = await booking(app, ADMIN, b.id, 'staff');
+  await app.command(ADMIN, 'staff', 'complete', { id: b.id, version: current.version, checked: true });
+  assert.equal((await booking(app, A, b.id)).fee, 1500);
+});
+
+test('settings are validated, versioned, admin only and kept in history', async () => {
+  const { app } = await fixture();
+  await app.acceptStaffInvitation('nurse', { permission: 'operator', name: '看護師', invitationId: 'x' });
+  const s = await app.read(ADMIN, 'staff');
+  await rejectsStatus(app.command('nurse', 'staff', 'update-settings', { version: s.settings.version, settings: s.settings }), 403);
+  await rejectsStatus(withRules(app, x => { x.openWeekdays = []; }), 400);
+  await rejectsStatus(withRules(app, x => { x.fees = [{ maxHours: 4, amount: 1000 }]; }), 400);
+  await rejectsStatus(withRules(app, x => { x.dailyCapacity = 10; }), 400); // exceeds room total 6
+  await rejectsStatus(withRules(app, x => { x.arrivalTimes = ['25:00']; }), 400);
+  const saved = await withRules(app, x => { x.profile.phone = '0584-00-0000'; x.closeOnHolidays = false; });
+  assert.equal(saved.version, 2);
+  await rejectsStatus(app.command(ADMIN, 'staff', 'update-settings', { version: 1, settings: s.settings }), 409); // stale form
+  const after = await app.read(ADMIN, 'staff');
+  assert.equal(after.settings.profile.phone, '0584-00-0000');
+  assert.equal(after.settingsHistory.at(-1).version, 1);
+  assert.equal(availability(await app.state(), '2026-10-12'), '受付開始前', 'holiday opens when the facility decides so');
 });

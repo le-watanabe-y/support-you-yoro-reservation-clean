@@ -32,3 +32,16 @@ h1,h2,h3,summary,[tabindex="-1"],[role="combobox"],[role="checkbox"],input,texta
 .child.overdue strong{color:#8f2538}
 footer a{text-decoration:underline}
 .terms h2{margin-top:1.6rem}.terms ol,.terms ul{padding-left:1.4rem}.terms li{margin:.3rem 0}
+.facility-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(15rem,1fr));gap:.8rem;margin:.6rem 0}
+.facility-card{display:flex;flex-direction:column;gap:.3rem;padding:1.1rem 1.2rem;border:1px solid #c9d6e2;border-radius:.8rem;background:#f8fbfd;text-decoration:none;text-align:left;color:inherit;font:inherit}
+.facility-card:hover{border-color:#147483;background:#eef7f6}
+.facility-card span{font-size:.875rem;color:#53647a}
+.title-actions{display:flex;flex-wrap:wrap;gap:.6rem;align-items:flex-end}
+.facility-switcher{min-width:15rem}.facility-switcher .field{margin:0}
+.inline-fields{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem;margin:.4rem 0}
+.inline-fields [data-slot=input]{width:auto;min-width:5.5rem;flex:1 1 6rem}
+.inline-fields span{font-size:.875rem;color:#53647a}
+.weekday-grid{display:flex;flex-wrap:wrap;gap:0 1.2rem}
+.settings-text{width:100%;min-height:5rem;border:1px solid #c0cddc;border-radius:.6rem;padding:.6rem .8rem;font:inherit}
+.link-button{background:none;border:0;padding:0;color:#265773;text-decoration:underline;font:inherit;cursor:pointer;text-align:left}
+.pre-line{white-space:pre-line}
