@@ -48,7 +48,7 @@ create table public.supportyou_identities (
   email text not null default '',
   name text not null default '',
   kind text not null check (kind in ('parent', 'staff')),
-  org_role text check (org_role in ('owner') and kind = 'staff'),
+  org_role text check (org_role is null or (org_role = 'owner' and kind = 'staff')),
   blocked boolean not null default false,
   created_at timestamptz not null default now()
 );

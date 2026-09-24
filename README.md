@@ -53,11 +53,11 @@ Google ドライブの試験版「Support you」（ChatGPT Sites 上の第18版�
 ### 1. Supabase
 
 1. プロジェクトを作成（リージョンは Tokyo 推奨）。
-2. SQL Editor で `supabase/migrations/20260923000000_support_you.sql` を実行（テーブル・関数・非公開バケットを作成）。
+2. SQL Editor で `supabase/migrations/20260923000000_support_you.sql` を実行（テーブル・関数・非公開バケットを作成）。2026-09-24 より前にこのファイルを実行済みの場合は、続けて `supabase/migrations/20260924000000_fix_identities_org_role_check.sql` も実行（保護者のアカウントが保存できない不具合の修正）。
 3. Authentication > URL Configuration
    - Site URL：公開URL（例 `https://support-you.vercel.app`）
    - Redirect URLs：`https://公開URL/auth/confirm`
-4. Authentication > Email Templates（リンクをサーバー側で確認する形式に変更）
+4. Authentication > Email Templates（リンクをサーバー側で確認する形式に変更。無料プランでは先に 5. の SMTP を設定しないと変更できません）
    - Confirm signup：リンクを `{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=email`
    - Reset Password：リンクを `{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=recovery`
 5. 本番では Authentication > SMTP Settings で独自のメール送信（Resend等）を設定してください。Supabase標準の送信は1時間あたりの件数制限があります。
